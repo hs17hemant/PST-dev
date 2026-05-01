@@ -1,0 +1,59 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug pstwriter_tests",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/pstwriter_tests.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "cmake-build"
+        },
+        {
+            "name": "Debug pstwriter_tests (single test)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/pstwriter_tests.exe",
+            "args": [
+                "${input:testName}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "cmake-build"
+        },
+        {
+            "name": "Debug pst_info",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/pst_info.exe",
+            "args": [
+                "${input:pstFilePath}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "cmake-build"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "testName",
+            "type": "promptString",
+            "description": "Catch2 test name pattern (use quotes for tags, e.g. \"[crc]\")",
+            "default": "*"
+        },
+        {
+            "id": "pstFilePath",
+            "type": "promptString",
+            "description": "Path to the .pst file to inspect",
+            "default": "${workspaceFolder}/build/test.pst"
+        }
+    ]
+}
