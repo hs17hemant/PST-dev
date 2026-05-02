@@ -726,3 +726,58 @@ TEST_CASE("SLBLOCK round-trips [MS-PST] Sec 3.7 sample byte-for-byte",
             crc32(regen.data(), trailerOff));
     REQUIRE(readU64(regen.data(), trailerOff + 8) == 0x1386u);
 }
+
+// ============================================================================
+// M5 PRE-FLIGHT PLACEHOLDERS (SKIPPED until M5 implementation lands).
+// These define the M5 implementation gates per the same pattern used for
+// the M4 [synthetic_pc_composition] placeholder during M3->M4 transition.
+//
+// When M5 lands:
+//   * remove the SKIP() lines
+//   * uncomment the round-trip assertions
+//   * the test name + tag identifies the exact M5 gate item it covers
+// ============================================================================
+
+// Sample summary (from sec 3.3, transcribed 2026-05-02 in M5 pre-flight):
+//   * 3 BTENTRY records (cEnt=3, cEntMax=0x14, cbEnt=0x18, cLevel=1)
+//   * page IB = 0x8200, page bid = 0x206
+//   * stored wSig = 0x8006, dwCRC = 0x02E8B164 (POSITIVE control: matches)
+//   * ptype = 0x81 (specifically intermediate NBT; format is shared with BBT)
+TEST_CASE("Intermediate BT page round-trips [MS-PST] Sec 3.3 sample byte-for-byte",
+          "[block][bt][golden_spec_bt_intermediate]")
+{
+    SKIP("M5 not implemented yet — buildBtIntermediatePage(...) is the gate");
+
+    // When M5 lands, the test body should:
+    // 1. Load tests/golden/spec_sample_bt_intermediate.bin (512 B).
+    // 2. Decode the 3 BTENTRYs at offsets [0..0x18), [0x18..0x30), [0x30..0x48).
+    //    Each BTENTRY layout per [SPEC sec 2.2.2.7.7.2]: btkey (8 B) + BREF (16 B).
+    // 3. Re-serialize via buildBtIntermediatePage(entries, count, pageBid, pageIb,
+    //    cEntMax=0x14, ptype=0x81 /* NBT */).
+    // 4. REQUIRE byte-for-byte equality across all 512 bytes including the
+    //    stored dwCRC (this is a clean positive control, unlike sec 3.5 / sec 3.7).
+}
+
+// Sample shape: minimum end-to-end PST that proves the M5 wiring contract.
+// Build a PST containing exactly:
+//   * one PC node (e.g. NID 0x21 + reserved nidType, message-store-shaped)
+//   * one TC node (e.g. NID 0x122 + reserved nidType, root-folder-hierarchy-shaped)
+//   * NBTENTRYs for both, with bidData pointing to the actual data blocks
+// pst_info should walk the PST and report ZERO orphan blocks (every block
+// is reachable from a NID via the NBT).
+TEST_CASE("End-to-end PST: PC + TC nodes have NBT entries, no orphan blocks",
+          "[ndb][nbt][end_to_end][m5_gate]")
+{
+    SKIP("M5 not implemented yet — M5Allocator + NBT writer + wiring layer are the gate");
+
+    // When M5 lands, the test body should:
+    // 1. Create a temp PST path.
+    // 2. Build the PC bytes via M4 buildPropertyContext().
+    // 3. Build the TC bytes via M4 buildTableContext().
+    // 4. Wire via M5: assign NIDs, register NBTENTRYs, register BBTENTRYs,
+    //    write the PST.
+    // 5. Run pst_info via tools/pst_info_run.hpp.
+    // 6. REQUIRE pst_info exit code == 0 ("ALL CHECKS PASSED").
+    // 7. REQUIRE no "orphan block" warnings in pst_info output.
+    // 8. Re-open the PST, walk the NBT, REQUIRE both PC and TC NIDs resolve.
+}

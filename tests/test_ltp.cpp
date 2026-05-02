@@ -1355,3 +1355,61 @@ TEST_CASE("readPropertyContext decodes [MS-PST] Sec 3.9 sample (HID-agnostic, re
     REQUIRE(props[9].inlineValue  == 0x000E000Du);
     REQUIRE(props[10].inlineValue == 0x00000000u);
 }
+
+// ============================================================================
+// M5 PRE-FLIGHT SEMANTIC-DECODE PLACEHOLDERS (SKIPPED).
+//
+// Per Part 1 finding: sec 3.10 (Sample Message Store) and sec 3.12 (Sample
+// Folder Object) are decode references for bytes already on disk:
+//   * sec 3.10 decodes the sec 3.8 HN bytes as the message store PC.
+//     "The binary data used in the last two examples (HN, BTH) is actually
+//     that of the message store PC of a PST" (verbatim from sec 3.10).
+//   * sec 3.12 decodes the sec 3.11 TC bytes; the three folder names listed
+//     ("Top of Personal Folders", "Search Root", "SPAM Search Folder 2") match
+//     the row strings already locked by [golden_spec_tc].
+//
+// These placeholders verify that our reader produces semantically-correct
+// decoded output, not just structurally-correct bytes.
+// ============================================================================
+
+TEST_CASE("PC reader decodes Sec 3.8 HN as message store PC matching Sec 3.10",
+          "[ltp][pc][read][semantic_decode_3_10][m5_gate]")
+{
+    SKIP("M5 not implemented yet — PC semantic decode against sec 3.10 reference");
+
+    // When M5 lands, the test body should:
+    // 1. Load tests/golden/spec_sample_hn.bin (already exists from M4).
+    // 2. Decode via readPropertyContext() — already implemented in M4.
+    // 3. Verify the 9 properties listed in sec 3.10:
+    //    PidTagReplVersionhistory  (0x0E340102, PtypBinary, 24 B)
+    //    PidTagReplFlags           (0x0E380003, PtypInteger32, 0)
+    //    PidTagRecordKey           (0x0FF90102, PtypBinary, 16 B)
+    //    PidTagDisplayName         (0x3001001F, PtypString, "UNICODE1" UTF-16-LE)
+    //    PidTagValidFolderMask     (0x35DF0003, PtypInteger32, 0x89)
+    //    PidTagIpmSubTreeEntryId   (0x35E00102, PtypBinary, 24 B)
+    //    PidTagIpmWastebasketEntryId (0x35E30102, PtypBinary, 24 B)
+    //    PidTagFinderEntryId       (0x35E70102, PtypBinary, 24 B)
+    //    PidTagPstPassword         (0x67FF0003, PtypInteger32, 0)
+    // 4. REQUIRE each prop's pidTagId, propType, valueSize match exactly.
+    // 5. For inline-int props, REQUIRE the integer value matches.
+    // 6. For binary/string props, REQUIRE byte-for-byte content match against
+    //    the hex strings published in sec 3.10.
+}
+
+TEST_CASE("TC reader decodes Sec 3.11 TC, three folder names match Sec 3.12",
+          "[ltp][tc][read][semantic_decode_3_12][m5_gate]")
+{
+    SKIP("M5 not implemented yet — TC semantic decode against sec 3.12 reference");
+
+    // When M5 lands, the test body should:
+    // 1. Load tests/golden/spec_sample_tc.bin (already exists from M4).
+    // 2. Decode via readTableContext() — needs M5 implementation.
+    // 3. Verify TC has 3 rows.
+    // 4. Verify each row's PidTagDisplayName-style varlen column decodes to:
+    //    row[0] = "Top of Personal Folders"
+    //    row[1] = "Search Root"
+    //    row[2] = "SPAM Search Folder 2"
+    //    (per sec 3.12; UTF-16-LE encoded in the underlying bytes.)
+    // 5. REQUIRE the row order matches sec 3.12 (the RowIndex BTH establishes
+    //    this; M5's reader walks BTH to enumerate rows).
+}
