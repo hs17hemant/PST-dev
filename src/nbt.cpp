@@ -1,9 +1,10 @@
 // pstwriter/src/nbt.cpp
 //
-// Implementation of the M5 Phase B NBT page writers.
+// Implementation of the M5 Phase B NBT page writers and Phase C reader.
 
 #include "nbt.hpp"
 
+#include "crc.hpp"
 #include "ndb.hpp"
 #include "page.hpp"
 #include "types.hpp"
@@ -17,6 +18,9 @@ using namespace std;
 
 namespace pstwriter {
 
+using detail::readU16;
+using detail::readU32;
+using detail::readU64;
 using detail::writeU8;
 using detail::writeU32;
 using detail::writeU64;
@@ -213,6 +217,214 @@ NbtTreeOutput buildNbtTree(const NbtEntry*         entries,
     out.rootBref = bids.intermediateBref;
     out.treeLevel = 1;
     return out;
+}
+
+// ============================================================================
+// NBT reader (Phase C)
+// ============================================================================
+namespace {
+
+// Return a pointer to the BTPAGE at the given IB after validating spec
+// invariants. Throws on any violation.
+const uint8_t* fetchAndValidatePage(const uint8_t*       fileBytes,
+                                    size_t               fileSize,
+                                    uint64_t             ib,
+                                    const NbtReadOptions& opts)
+{
+    if (ib > fileSize || ib + kPageSize > fileSize) {
+        throw runtime_error("nbt reader: page IB extends past EOF");
+    }
+    const uint8_t* page = fileBytes + static_cast<size_t>(ib);
+
+    // PAGETRAILER (16 B at offset 496):
+    const uint8_t pType       = page[kPageTrailerOffset + 0];
+    const uint8_t pTypeRepeat = page[kPageTrailerOffset + 1];
+
+    // Reader expects ptypeNBT (0x81) for NBT pages. (BBT-side reader is
+    // M3's domain; we only walk NBT here.)
+    if (pType != ptype::kNBT) {
+        throw runtime_error(
+            "nbt reader: page ptype != ptypeNBT (page is not part of NBT)");
+    }
+    if (pType != pTypeRepeat) {
+        throw runtime_error(
+            "nbt reader: PAGETRAILER ptype != ptypeRepeat");
+    }
+
+    // BTPAGE control bytes:
+    const uint8_t cEnt    = page[kBtPageCEnt];
+    const uint8_t cEntMax = page[kBtPageCEntMax];
+    const uint8_t cbEnt   = page[kBtPageCbEnt];
+    const uint8_t cLevel  = page[kBtPageCLevel];
+    if (cEnt > cEntMax) {
+        throw runtime_error("nbt reader: BTPAGE.cEnt > cEntMax");
+    }
+    if (cLevel == 0u) {
+        if (cbEnt != kNbtLeafEntrySize) {
+            throw runtime_error(
+                "nbt reader: leaf NBT page has cbEnt != 32");
+        }
+    } else {
+        if (cbEnt != kBtEntrySize) {
+            throw runtime_error(
+                "nbt reader: intermediate NBT page has cbEnt != 24");
+        }
+        if (cLevel > 1u) {
+            // M5 supports cLevel <= 1 only (per design doc).
+            throw runtime_error(
+                "nbt reader: cLevel > 1 (multi-level intermediate is M7+)");
+        }
+    }
+
+    if (opts.strictCrc) {
+        const uint32_t storedCrc =
+            readU32(page, kPageTrailerOffset + 4);
+        const uint32_t computedCrc = crc32(page, kPageBodySize);
+        if (storedCrc != computedCrc) {
+            throw runtime_error("nbt reader: dwCRC mismatch");
+        }
+    }
+    return page;
+}
+
+// Decode one NBTENTRY from the leaf page at the given record offset.
+NbtRecord decodeNbtEntry(const uint8_t* page, size_t recOff) noexcept
+{
+    NbtRecord r;
+    r.nid       = Nid{readU32(page, recOff + 0)};
+    // bytes 4..7 are zero pad (per spec NID is "extended to 8 bytes").
+    r.bidData   = Bid{readU64(page, recOff + 8)};
+    r.bidSub    = Bid{readU64(page, recOff + 16)};
+    r.nidParent = Nid{readU32(page, recOff + 24)};
+    return r;
+}
+
+// Walk a leaf BTPAGE, looking for `target`. Returns true if found.
+// Linear scan -- leaf has at most 15 NBTENTRYs.
+bool searchLeaf(const uint8_t* page, Nid target, NbtRecord* out) noexcept
+{
+    const uint8_t cEnt = page[kBtPageCEnt];
+    for (size_t i = 0; i < cEnt; ++i) {
+        const NbtRecord r = decodeNbtEntry(page, i * kNbtLeafEntrySize);
+        if (r.nid.value == target.value) {
+            if (out) *out = r;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Walk an intermediate BTPAGE. Find the BTENTRY whose btkey is the
+// largest <= target (= "rightmost child whose keyspace covers target").
+// Returns the child BREF, or throws if no such child exists (target
+// less than the smallest btkey -- shouldn't happen in a well-formed NBT
+// because the smallest btkey of the root must be <= the smallest NID
+// in the tree, which in turn is the smallest NID we could ever ask for).
+Bref descendIntermediate(const uint8_t* page, Nid target)
+{
+    const uint8_t cEnt = page[kBtPageCEnt];
+    if (cEnt == 0u) {
+        throw runtime_error(
+            "nbt reader: intermediate BTPAGE has cEnt == 0");
+    }
+
+    // Find the entry with the largest btkey <= target.value. BTENTRYs
+    // are sorted ascending by btkey (Phase B writer guarantees this).
+    int chosen = -1;
+    for (size_t i = 0; i < cEnt; ++i) {
+        const size_t off = i * kBtEntrySize;
+        const uint64_t btkey = readU64(page, off + 0);
+        if (btkey <= static_cast<uint64_t>(target.value)) {
+            chosen = static_cast<int>(i);
+        } else {
+            break;
+        }
+    }
+
+    if (chosen < 0) {
+        // Target is smaller than the smallest btkey. By spec,
+        // "all entries in the child BTPAGE referenced by BREF have key
+        // values >= this btkey" -- so target is below every child's
+        // keyspace. NID is not present.
+        Bref invalid; // bid=0, ib=0 -- callers check by .bid.value == 0
+        return invalid;
+    }
+
+    const size_t off = static_cast<size_t>(chosen) * kBtEntrySize;
+    Bref child;
+    child.bid = Bid{readU64(page, off + 8)};
+    child.ib  = Ib {readU64(page, off + 16)};
+    return child;
+}
+
+void enumerateLeaf(const uint8_t* page, vector<NbtRecord>& out)
+{
+    const uint8_t cEnt = page[kBtPageCEnt];
+    for (size_t i = 0; i < cEnt; ++i) {
+        out.push_back(decodeNbtEntry(page, i * kNbtLeafEntrySize));
+    }
+}
+
+} // anonymous namespace
+
+bool nbtFind(const uint8_t*        fileBytes,
+             size_t                fileSize,
+             Bref                  rootBref,
+             Nid                   target,
+             NbtRecord*            out,
+             const NbtReadOptions& opts)
+{
+    const uint8_t* page = fetchAndValidatePage(
+        fileBytes, fileSize, rootBref.ib.value, opts);
+
+    if (page[kBtPageCLevel] == 0u) {
+        return searchLeaf(page, target, out);
+    }
+
+    // cLevel == 1: descend to the leaf.
+    const Bref childBref = descendIntermediate(page, target);
+    if (childBref.bid.value == 0u && childBref.ib.value == 0u) {
+        return false; // target below all children
+    }
+    const uint8_t* leaf = fetchAndValidatePage(
+        fileBytes, fileSize, childBref.ib.value, opts);
+    if (leaf[kBtPageCLevel] != 0u) {
+        throw runtime_error(
+            "nbt reader: child of cLevel=1 page is not a leaf");
+    }
+    return searchLeaf(leaf, target, out);
+}
+
+void nbtForEach(const uint8_t*        fileBytes,
+                size_t                fileSize,
+                Bref                  rootBref,
+                vector<NbtRecord>&    outRecords,
+                const NbtReadOptions& opts)
+{
+    const uint8_t* root = fetchAndValidatePage(
+        fileBytes, fileSize, rootBref.ib.value, opts);
+    outRecords.clear();
+
+    if (root[kBtPageCLevel] == 0u) {
+        enumerateLeaf(root, outRecords);
+        return;
+    }
+
+    // cLevel == 1: enumerate every leaf in BTENTRY order.
+    const uint8_t cEnt = root[kBtPageCEnt];
+    for (size_t i = 0; i < cEnt; ++i) {
+        const size_t off = i * kBtEntrySize;
+        Bref childBref;
+        childBref.bid = Bid{readU64(root, off + 8)};
+        childBref.ib  = Ib {readU64(root, off + 16)};
+        const uint8_t* leaf = fetchAndValidatePage(
+            fileBytes, fileSize, childBref.ib.value, opts);
+        if (leaf[kBtPageCLevel] != 0u) {
+            throw runtime_error(
+                "nbt reader: forEach: child of cLevel=1 page is not a leaf");
+        }
+        enumerateLeaf(leaf, outRecords);
+    }
 }
 
 } // namespace pstwriter

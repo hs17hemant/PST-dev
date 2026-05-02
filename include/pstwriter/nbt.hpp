@@ -128,4 +128,66 @@ NbtTreeOutput buildNbtTree(const NbtEntry*          entries,
                            size_t                   count,
                            const NbtTreeInputBids&  bids);
 
+// ============================================================================
+// NBT reader (Phase C)
+//
+// Walks an NBT given the root BREF and a memory-mapped PST byte buffer.
+// The reader is **NID-order-agnostic**: it makes NO assumption about
+// NID stride, contiguity, or matching M5Allocator's deterministic output
+// sequence. Resolution proceeds by binary-search descent through
+// intermediate BTPAGEs to a leaf, then linear scan within the leaf.
+//
+// This is the same lesson as the M4 PC reader's HID-agnosticism (vindicated
+// by the sec 3.9 cross-validation that found Outlook-extracted HIDs
+// non-monotonic). For NBT we have no spec sample with non-monotonic NIDs
+// to cross-validate against, so the test [non_monotonic_nids] explicitly
+// constructs that case.
+//
+// Spec invariants ENFORCED (each throws std::runtime_error):
+//   * PAGETRAILER.ptype matches BTPAGE expectation (ptypeNBT)
+//   * PAGETRAILER.ptypeRepeat == ptype
+//   * BTPAGE.cbEnt is one of {kNbtLeafEntrySize=32, kBtEntrySize=24}
+//   * BTPAGE.cEnt <= BTPAGE.cEntMax
+//   * dwCRC matches crc32(bytes[0..496))   (when strictMode)
+//   * IB read does not overflow the file buffer
+//   * Tree depth bounded -- M5 cap is cLevel <= 1
+//
+// Spec invariants NOT ENFORCED (would silently break compatibility with
+// real Outlook PSTs):
+//   * NID stride / contiguity / writer-determined layout
+//   * dwPadding bytes equal to zero (per 2.2.2.7.7.1: "unused space can
+//     contain any value")
+//   * NBTENTRY ordering consistency across leaves (we trust each leaf's
+//     local sort but don't assert global monotonic across siblings)
+// ============================================================================
+struct NbtRecord {
+    Nid nid       {};
+    Bid bidData   {};
+    Bid bidSub   {};
+    Nid nidParent {};
+};
+
+struct NbtReadOptions {
+    bool strictCrc = true; // verify each page's dwCRC
+};
+
+// Look up a NID by walking the NBT from rootBref. Returns true if found
+// and populates *out. Returns false if the NID is not present (no
+// throw). Throws std::runtime_error on structural / invariant violations.
+bool nbtFind(const uint8_t*       fileBytes,
+             size_t               fileSize,
+             Bref                 rootBref,
+             Nid                  target,
+             NbtRecord*           out,
+             const NbtReadOptions& opts = {});
+
+// Enumerate all NBTENTRYs reachable from rootBref. Visits each
+// (in NID-ascending order across all leaves). Throws on structural
+// violations.
+void nbtForEach(const uint8_t*       fileBytes,
+                size_t               fileSize,
+                Bref                 rootBref,
+                vector<NbtRecord>&   outRecords,
+                const NbtReadOptions& opts = {});
+
 } // namespace pstwriter
