@@ -17,6 +17,8 @@
 
 #include "block.hpp"
 #include "crc.hpp"
+#include "encoding.hpp"
+#include "ltp.hpp"
 #include "ndb.hpp"
 #include "page.hpp"
 #include "types.hpp"
@@ -104,6 +106,234 @@ void printHex(const string& label, uint64_t v, int width = 16)
          << dec << setfill(' ') << left << "\n";
 }
 
+// In-place inverse-permute decryption — the §5.1 mpbbI table is at
+// permuteTable() + 512. This is the read-side complement of
+// encodePermute(), which we need here to peer into encrypted data
+// blocks. We don't expose this in encoding.hpp because the writer
+// library is write-only by charter; the tool decrypts for diagnostics.
+void decodePermuteInPlace(uint8_t* data, size_t length) noexcept
+{
+    const uint8_t* mpbbI = pstwriter::permuteTable() + 512;
+    for (size_t i = 0; i < length; ++i) {
+        data[i] = mpbbI[data[i]];
+    }
+}
+
+// Resolve an HID against a single-block HN body. Reports failures via
+// CheckLog rather than throwing — this is a diagnostic tool, not a
+// reader path, so we want every issue surfaced to the user.
+struct HidSlice {
+    bool   ok;
+    size_t off;
+    size_t size;
+};
+
+HidSlice resolveHid(uint32_t hid, const vector<uint8_t>& hn,
+                    size_t hnpmOff, uint16_t cAlloc) noexcept
+{
+    const uint8_t  hType = static_cast<uint8_t> (hid & 0x1Fu);
+    const uint16_t hIdx  = static_cast<uint16_t>((hid >> 5) & 0x07FFu);
+    const uint16_t hBlk  = static_cast<uint16_t>((hid >> 16) & 0xFFFFu);
+    if (hType != 0u || hIdx == 0u || hBlk != 0u || hIdx > cAlloc) {
+        return {false, 0, 0};
+    }
+    const size_t startOff = hnpmOff + 4u + (size_t(hIdx) - 1u) * 2u;
+    const size_t endOff   = hnpmOff + 4u + size_t(hIdx)        * 2u;
+    if (endOff + 2u > hn.size()) return {false, 0, 0};
+    const uint16_t s = readU16(hn.data(), startOff);
+    const uint16_t e = readU16(hn.data(), endOff);
+    if (e < s || e > hn.size()) return {false, 0, 0};
+    return {true, size_t(s), size_t(e) - s};
+}
+
+// Walk a data block's plaintext as if it were an HN. Reports findings
+// to stdout and increments log.failures on structural violations.
+//
+// `plaintext` is the post-decryption HN body (cb bytes — the same `cb`
+// stored in BBTENTRY). All HN structures live entirely within this
+// buffer (single-block HN, M4 cut).
+//
+// Returns true if the block is a recognized PC or TC; false if it
+// doesn't look like an HN (caller can move on without complaint —
+// not every data block is an LTP).
+bool walkHnDataBlock(const vector<uint8_t>& plaintext,
+                     uint64_t               blockBid,
+                     uint64_t               blockIb,
+                     CheckLog&              log)
+{
+    using namespace pstwriter;
+    if (plaintext.size() < kHnHdrSize) return false;
+    if (plaintext[2] != kHnSignature) return false;  // not an HN
+
+    const uint16_t ibHnpm     = readU16(plaintext.data(), 0);
+    const uint8_t  bClientSig = plaintext[3];
+    const uint32_t hidUserRoot = readU32(plaintext.data(), 4);
+
+    cout << "\nLTP HN @ block bid=0x" << hex << uppercase << blockBid
+         << " ib=0x" << blockIb << dec << "\n";
+    printHex("  ibHnpm",         ibHnpm,      4);
+    printHex("  bClientSig",     bClientSig,  2);
+    printHex("  hidUserRoot",    hidUserRoot, 8);
+
+    if (ibHnpm + 4u > plaintext.size()) {
+        log.fail("HN ibHnpm out of range");
+        return true;
+    }
+    const uint16_t cAlloc = readU16(plaintext.data(), ibHnpm + 0);
+    const uint16_t cFree  = readU16(plaintext.data(), ibHnpm + 2);
+    const size_t   pmEnd  = ibHnpm + 4u + (size_t(cAlloc) + 1u) * 2u;
+    if (pmEnd > plaintext.size()) {
+        log.fail("HN HNPAGEMAP extends past plaintext end");
+        return true;
+    }
+    cout << "  HNPAGEMAP cAlloc=" << cAlloc << " cFree=" << cFree << "\n";
+    log.pass("HN signature + HNPAGEMAP bounds OK");
+
+    // Validate every allocation slot (rgibAlloc[i] <= rgibAlloc[i+1] and
+    // <= ibHnpm). Empty allocations (size 0) are legal — emitted by TC
+    // for zero-row matrices.
+    bool slotsOk = true;
+    for (size_t i = 0; i <= cAlloc; ++i) {
+        const uint16_t v = readU16(plaintext.data(), ibHnpm + 4u + i * 2u);
+        if (v > ibHnpm) { slotsOk = false; break; }
+        if (i > 0) {
+            const uint16_t prev = readU16(plaintext.data(), ibHnpm + 4u + (i - 1) * 2u);
+            if (v < prev) { slotsOk = false; break; }
+        }
+    }
+    if (slotsOk) log.pass("HN allocation offsets monotonic + within ibHnpm");
+    else         log.fail("HN allocation offsets violate ordering / bounds");
+
+    // Branch on bClientSig.
+    if (bClientSig == kBClientSigPC) {
+        // PC: walk via readPropertyContext (HID-agnostic, validates
+        // BTHHEADER + leaf-record structure for us).
+        try {
+            const auto props = readPropertyContext(plaintext.data(), plaintext.size());
+            cout << "  PC properties: " << props.size() << "\n";
+            for (const auto& p : props) {
+                const char* sclass = "?";
+                switch (p.storage) {
+                    case ReadPcProp::Storage::Inline:  sclass = "inline";  break;
+                    case ReadPcProp::Storage::HnAlloc: sclass = "hn-alloc"; break;
+                    case ReadPcProp::Storage::Subnode: sclass = "subnode";  break;
+                }
+                // `right` is asserted before each setw use so the
+                // earlier `left` from printHex doesn't leak in and
+                // left-pad with '0' (which produces "E080" instead of
+                // "0E08" for pidTagId 0x0E08).
+                cout << "    PidTag=0x" << right << hex << uppercase
+                     << setw(4) << setfill('0') << p.pidTagId
+                     << " Type=0x" << setw(4) << setfill('0')
+                     << static_cast<uint16_t>(p.propType)
+                     << dec << setfill(' ') << "  storage=" << sclass;
+                if (p.storage == ReadPcProp::Storage::HnAlloc) {
+                    cout << "  size=" << p.valueSize;
+                } else if (p.storage == ReadPcProp::Storage::Subnode) {
+                    cout << "  nid=0x" << right << hex << uppercase
+                         << setw(8) << setfill('0') << p.subnodeNid.value
+                         << dec << setfill(' ');
+                } else {
+                    cout << "  value=0x" << right << hex << uppercase
+                         << setw(8) << setfill('0') << p.inlineValue
+                         << dec << setfill(' ');
+                }
+                cout << "\n";
+            }
+            log.pass("PC walk: BTH structure valid + every HID resolves");
+        } catch (const std::exception& e) {
+            string msg = "PC walk failed: ";
+            msg += e.what();
+            log.fail(msg);
+        }
+    } else if (bClientSig == kBClientSigTC) {
+        // TC: walk TCINFO + RowIndex BTH + Row Matrix manually (we
+        // don't have a readTableContext yet — that's an M5 hardening
+        // task).
+        const HidSlice tcInfo = resolveHid(hidUserRoot, plaintext, ibHnpm, cAlloc);
+        if (!tcInfo.ok || tcInfo.size < 22u) {
+            log.fail("TC: hidUserRoot does not resolve to a valid TCINFO allocation");
+            return true;
+        }
+        const uint8_t  bType   = plaintext[tcInfo.off + 0];
+        const uint8_t  cCols   = plaintext[tcInfo.off + 1];
+        const uint16_t r4b     = readU16(plaintext.data(), tcInfo.off + 2);
+        const uint16_t r2b     = readU16(plaintext.data(), tcInfo.off + 4);
+        const uint16_t r1b     = readU16(plaintext.data(), tcInfo.off + 6);
+        const uint16_t rbm     = readU16(plaintext.data(), tcInfo.off + 8);
+        const uint32_t hidRow  = readU32(plaintext.data(), tcInfo.off + 10);
+        const uint32_t hnidRow = readU32(plaintext.data(), tcInfo.off + 14);
+
+        if (bType != kTcSignature) {
+            log.fail("TC: TCINFO.bType != 0x7C");
+            return true;
+        }
+        if (tcInfo.size != 22u + 8u * size_t(cCols)) {
+            log.fail("TC: TCINFO allocation size doesn't match 22 + 8*cCols");
+            return true;
+        }
+        cout << "  TC cCols=" << +cCols
+             << " rgib={0x" << right << hex << uppercase << setw(4) << setfill('0')
+             << r4b << ", 0x" << setw(4) << setfill('0') << r2b
+             << ", 0x" << setw(4) << setfill('0') << r1b
+             << ", 0x" << setw(4) << setfill('0') << rbm
+             << dec << setfill(' ') << "}\n";
+        cout << "    hidRowIndex=0x" << right << hex << uppercase
+             << setw(8) << setfill('0') << hidRow
+             << " hnidRows=0x" << setw(8) << setfill('0') << hnidRow
+             << dec << setfill(' ') << "\n";
+
+        // RowIndex BTH walk (count rows).
+        size_t rowCount = 0;
+        const HidSlice rIdxHdr = resolveHid(hidRow, plaintext, ibHnpm, cAlloc);
+        if (!rIdxHdr.ok || rIdxHdr.size != 8u) {
+            log.fail("TC: hidRowIndex does not resolve to an 8-byte BTHHEADER");
+        } else {
+            const uint8_t  cbKey   = plaintext[rIdxHdr.off + 1];
+            const uint8_t  cbEnt   = plaintext[rIdxHdr.off + 2];
+            const uint8_t  bIdxLvl = plaintext[rIdxHdr.off + 3];
+            const uint32_t hidLeaf = readU32(plaintext.data(), rIdxHdr.off + 4);
+            if (cbKey != 4u || cbEnt != 4u || bIdxLvl != 0u) {
+                log.fail("TC: RowIndex BTHHEADER must be cbKey=4 cbEnt=4 bIdxLevels=0");
+            } else if (((hidLeaf >> 5) & 0x7FFu) == 0u) {
+                rowCount = 0;  // empty TC
+            } else {
+                const HidSlice leaf = resolveHid(hidLeaf, plaintext, ibHnpm, cAlloc);
+                if (!leaf.ok || (leaf.size % 8u) != 0u) {
+                    log.fail("TC: RowIndex leaf size not divisible by 8");
+                } else {
+                    rowCount = leaf.size / 8u;
+                }
+            }
+        }
+        cout << "    rowCount=" << rowCount << "\n";
+
+        // Row Matrix size check (cross-check against RowIndex count).
+        if (rowCount > 0 && hnidRow != 0) {
+            // hnidRows is HID iff low 5 bits == 0 (the M4 cut never
+            // promotes Row Matrix to subnode).
+            if ((hnidRow & 0x1Fu) != 0u) {
+                log.pass("TC: Row Matrix is in a subnode (NID), not in HN");
+            } else {
+                const HidSlice rm = resolveHid(hnidRow, plaintext, ibHnpm, cAlloc);
+                if (!rm.ok) {
+                    log.fail("TC: hnidRows HID does not resolve");
+                } else if (rm.size != rowCount * size_t(rbm)) {
+                    log.fail("TC: Row Matrix size != rowCount * endBm");
+                } else {
+                    log.pass("TC: Row Matrix size matches rowCount * endBm");
+                }
+            }
+        } else if (rowCount == 0 && hnidRow == 0) {
+            log.pass("TC: zero-row TC has hnidRows == 0 per spec");
+        }
+    } else {
+        cout << "  bClientSig=0x" << hex << uppercase << +bClientSig << dec
+             << " (not PC or TC; skipping deep walk)\n";
+    }
+    return true;
+}
+
 void checkPageTrailer(const uint8_t* page, uint64_t ibPage,
                       const string& label, CheckLog& log)
 {
@@ -142,14 +372,12 @@ void checkPageTrailer(const uint8_t* page, uint64_t ibPage,
 
 } // anonymous namespace
 
-int main(int argc, char** argv)
+// Body of `main`, exposed so tests can invoke pst_info's diagnostic
+// pipeline without round-tripping through cmd.exe's quoting quirks.
+// Returns 0 on success (== "ALL CHECKS PASSED"), 1 on any check
+// failure, 2 on usage error / unreadable file.
+int runPstInfo(const string& path)
 {
-    if (argc != 2) {
-        cerr << "usage: pst_info <path.pst>\n";
-        return 2;
-    }
-
-    const string path = argv[1];
     vector<uint8_t> file;
     if (!slurp(path, file)) {
         cerr << "FAIL: cannot read '" << path << "'\n";
@@ -293,6 +521,13 @@ int main(int argc, char** argv)
         size_t verifiedBlockCRCs = 0;
         size_t blockCrcFails     = 0;
 
+        struct DataBlockEntry {
+            uint64_t bid;
+            uint64_t ib;
+            uint16_t cb;
+        };
+        vector<DataBlockEntry> dataBlocks;
+
         auto verifyLeaf = [&](const uint8_t* leaf, const string& tag) {
             const uint8_t cEnt = leaf[kBtPageCEnt];
             for (size_t i = 0; i < cEnt; ++i) {
@@ -301,6 +536,12 @@ int main(int argc, char** argv)
                 const uint64_t blockIb  = readU64(leaf, off + 8);
                 const uint16_t cb       = readU16(leaf, off + 16);
                 ++totalBbtEntries;
+                // bit[1] of BID == 0 marks data blocks (vs internal
+                // XBLOCK/SLBLOCK/etc.). Data blocks are the only kind
+                // that can host an HN per [MS-PST] §2.3.1.
+                if ((blockBid & 0x2ull) == 0ull) {
+                    dataBlocks.push_back({blockBid, blockIb, cb});
+                }
 
                 const size_t totalCb = roundBlockSize(cb);
                 if (blockIb + totalCb > file.size()) {
@@ -377,6 +618,62 @@ int main(int argc, char** argv)
         } else {
             log.fail(summary);
         }
+
+        // ---- Step 4: LTP walk -------------------------------------------------
+        // For every data block, decrypt the cb-byte payload and check the
+        // [MS-PST] §2.3.1.2 HN signature (bSig at offset 2). If found,
+        // walk the HN per its bClientSig (PC / TC / other).
+        //
+        // Decryption uses the HEADER's bCryptMethod (typically PERMUTE).
+        // For Cyclic the key is the lower 32 bits of the block's BID.
+        size_t hnFound  = 0;
+        size_t pcFound  = 0;
+        size_t tcFound  = 0;
+        for (const auto& db : dataBlocks) {
+            if (db.ib + db.cb > file.size()) continue;
+
+            vector<uint8_t> plaintext(db.cb);
+            std::memcpy(plaintext.data(), file.data() + db.ib, db.cb);
+            switch (static_cast<CryptMethod>(bCryptMethod)) {
+                case CryptMethod::None:
+                    break;
+                case CryptMethod::Permute:
+                    decodePermuteInPlace(plaintext.data(), plaintext.size());
+                    break;
+                case CryptMethod::Cyclic:
+                    encodeCyclic(plaintext.data(), plaintext.size(),
+                                 static_cast<uint32_t>(db.bid & 0xFFFFFFFFu));
+                    break;
+                default:
+                    // Unknown crypt method — skip this block's LTP walk.
+                    continue;
+            }
+
+            if (plaintext.size() < kHnHdrSize) continue;
+            if (plaintext[2] != kHnSignature) continue;
+
+            ++hnFound;
+            if (plaintext[3] == kBClientSigPC) ++pcFound;
+            if (plaintext[3] == kBClientSigTC) ++tcFound;
+            walkHnDataBlock(plaintext, db.bid, db.ib, log);
+        }
+
+        if (hnFound > 0) {
+            char ltpSummary[160];
+            std::snprintf(ltpSummary, sizeof(ltpSummary),
+                          "LTP walked: %zu HN block(s) — %zu PC, %zu TC",
+                          hnFound, pcFound, tcFound);
+            log.pass(ltpSummary);
+        } else if (!dataBlocks.empty()) {
+            // PSTs with data blocks but no LTP (e.g. M3 test PSTs full
+            // of synthetic byte payloads) — not a failure, just a note.
+            char info[120];
+            std::snprintf(info, sizeof(info),
+                          "LTP scan: 0 HN blocks among %zu data block(s) "
+                          "(no LTP content detected)",
+                          dataBlocks.size());
+            log.pass(info);
+        }
     }
 
     cout << "\n";
@@ -388,3 +685,14 @@ int main(int argc, char** argv)
          << (log.failures == 1 ? "" : "s") << ")\n";
     return 1;
 }
+
+#ifndef PSTWRITER_PST_INFO_NO_MAIN
+int main(int argc, char** argv)
+{
+    if (argc != 2) {
+        cerr << "usage: pst_info <path.pst>\n";
+        return 2;
+    }
+    return runPstInfo(argv[1]);
+}
+#endif
