@@ -21,21 +21,30 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 # --------------------------------------------------------------------
 # Options
 # --------------------------------------------------------------------
-option(PSTWRITER_BUILD_TESTS  "Build pstwriter unit tests"          ON)
-option(PSTWRITER_BUILD_TOOLS  "Build pst_info and other CLI tools"  ON)
-option(PSTWRITER_WARNINGS_AS_ERRORS "Treat compile warnings as errors" ON)
+option(PSTWRITER_BUILD_TESTS         "Build pstwriter unit tests"             ON)
+option(PSTWRITER_BUILD_TOOLS         "Build pst_info and other CLI tools"     ON)
+option(PSTWRITER_WARNINGS_AS_ERRORS  "Treat compile warnings as errors"       ON)
 
 # --------------------------------------------------------------------
-# pstwriter core library (currently M1 sources only)
+# pstwriter core library (M1 + M2 sources)
 # --------------------------------------------------------------------
 add_library(pstwriter STATIC
     src/crc.cpp
     src/encoding.cpp
+    src/ndb.cpp
+    src/page.cpp
+    src/block.cpp
+    src/writer.cpp
+    src/ltp.cpp
 )
 
+# Two include paths so internal code can write `#include "crc.hpp"`
+# (bare) and downstream consumers can write `#include <pstwriter/crc.hpp>`
+# (namespaced). The first is also picked up by the test binary.
 target_include_directories(pstwriter
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/pstwriter>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -46,7 +55,7 @@ target_compile_features(pstwriter PUBLIC cxx_std_17)
 # --------------------------------------------------------------------
 if(MSVC)
     # /W4 = high warning level. /permissive- = strict standards conformance.
-    # /Zc:__cplusplus = report the real __cplusplus value (needed for some checks).
+    # /Zc:__cplusplus = report the real __cplusplus value.
     target_compile_options(pstwriter PRIVATE
         /W4
         /permissive-
@@ -83,7 +92,7 @@ if(PSTWRITER_BUILD_TESTS)
 endif()
 
 if(PSTWRITER_BUILD_TOOLS)
-    # tools/CMakeLists.txt is added in M2 when pst_info exists.
+    # tools/CMakeLists.txt is added in M2 once pst_info exists.
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
         add_subdirectory(tools)
     endif()

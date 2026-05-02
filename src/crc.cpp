@@ -20,10 +20,12 @@
 // (zlib's crc32 of the same string would return 0xCBF43926 — that mismatch
 // is exactly what test_crc.cpp asserts in the "PST CRC-32 is not zlib" case.)
 
-#include "pstwriter/crc.hpp"
+#include "crc.hpp"
 
 #include <array>
 #include <cstring>
+
+using namespace std;
 
 namespace pstwriter {
 
@@ -34,7 +36,7 @@ namespace {
 // 256 entries; identical to the table in zlib — the difference between
 // the two algorithms lies in init + final XOR, not in table contents.
 // ---------------------------------------------------------------------------
-constexpr std::array<std::uint32_t, 256> kCrcTable = {{
+constexpr array<uint32_t, 256> kCrcTable = {{
     0x00000000u, 0x77073096u, 0xEE0E612Cu, 0x990951BAu,
     0x076DC419u, 0x706AF48Fu, 0xE963A535u, 0x9E6495A3u,
     0x0EDB8832u, 0x79DCB8A4u, 0xE0D5E91Eu, 0x97D2D988u,
@@ -114,7 +116,7 @@ static_assert(kCrcTable[0xFF] == 0x2D02EF8Du, "CRC table[0xFF] mismatch");
 
 } // anonymous namespace
 
-std::uint32_t crc32(const std::uint8_t* data, std::size_t length) noexcept
+uint32_t crc32(const uint8_t* data, size_t length) noexcept
 {
     // [MS-PST] §5.3 algorithm:
     //   * initial CRC = 0  (NOT 0xFFFFFFFF as in zlib)
@@ -126,9 +128,9 @@ std::uint32_t crc32(const std::uint8_t* data, std::size_t length) noexcept
         return 0u;
     }
 
-    std::uint32_t crc = 0u;
-    for (std::size_t i = 0; i < length; ++i) {
-        const std::uint8_t b = data[i];
+    uint32_t crc = 0u;
+    for (size_t i = 0; i < length; ++i) {
+        const uint8_t b = data[i];
         crc = (crc >> 8) ^ kCrcTable[(crc ^ b) & 0xFFu];
     }
     return crc;
