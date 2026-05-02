@@ -6,6 +6,7 @@
 #include "writer.hpp"
 
 #include "block.hpp"
+#include "nbt.hpp"
 #include "ndb.hpp"
 #include "page.hpp"
 #include "types.hpp"
@@ -489,6 +490,234 @@ WriteResult writeXBlockPst(const string&  path,
                                   bidNbtLeaf,
                                   bidBbtRoot,
                                   bidBbtLeaves);
+}
+
+// ===========================================================================
+// M5 Phase D: writeM5Pst -- end-to-end PST with NBT entries (no orphan
+// blocks). See writer.hpp for the layout/contract.
+// ===========================================================================
+WriteResult writeM5Pst(const string&                  path,
+                       const vector<M5DataBlockSpec>& blocks,
+                       const vector<M5Node>&          nodes) noexcept
+{
+    if (blocks.size() > kBbtMaxEntriesPerLeaf * kBtMaxEntriesPerPage) {
+        return fail("M5: BBT supports at most 400 blocks (1 intermediate level)");
+    }
+    if (nodes.size() > kNbtLeafMaxEntries * kBtIntermediateMaxEntries) {
+        return fail("M5: NBT supports at most 300 nodes (1 intermediate level)");
+    }
+
+    // ---- 1. Compute layout ------------------------------------------------
+    constexpr uint64_t kBlocksStart = 0x600;
+    uint64_t cursor = kBlocksStart;
+    vector<uint64_t> blockIbs;
+    blockIbs.reserve(blocks.size());
+    for (const auto& b : blocks) {
+        blockIbs.push_back(cursor);
+        cursor += b.encodedBlock.size();
+    }
+    cursor = alignUp(cursor, kPageSize);
+
+    // BBT plumbing
+    const size_t nBbtLeaves =
+        blocks.empty()
+            ? 1u
+            : (blocks.size() + kBbtMaxEntriesPerLeaf - 1) / kBbtMaxEntriesPerLeaf;
+    vector<uint64_t> bbtLeafIbs;
+    bbtLeafIbs.reserve(nBbtLeaves);
+    for (size_t i = 0; i < nBbtLeaves; ++i) {
+        bbtLeafIbs.push_back(cursor);
+        cursor += kPageSize;
+    }
+    const bool   hasBbtIntermediate = (nBbtLeaves > 1);
+    const uint64_t bbtRootIb        = hasBbtIntermediate ? cursor : bbtLeafIbs.front();
+    if (hasBbtIntermediate) cursor += kPageSize;
+
+    // NBT plumbing
+    const size_t nNbtLeaves =
+        nodes.empty()
+            ? 1u
+            : (nodes.size() + kNbtLeafMaxEntries - 1) / kNbtLeafMaxEntries;
+    vector<uint64_t> nbtLeafIbs;
+    nbtLeafIbs.reserve(nNbtLeaves);
+    for (size_t i = 0; i < nNbtLeaves; ++i) {
+        nbtLeafIbs.push_back(cursor);
+        cursor += kPageSize;
+    }
+    const bool   hasNbtIntermediate = (nNbtLeaves > 1);
+    const uint64_t nbtRootIb        = hasNbtIntermediate ? cursor : nbtLeafIbs.front();
+    if (hasNbtIntermediate) cursor += kPageSize;
+
+    const uint64_t ibFileEof = cursor;
+
+    // ---- 2. Allocate page BIDs (internal) --------------------------------
+    // Bid::makeInternal(1) = 0x07 is the AMap. Continue from 2.
+    Bid nextPageBid = Bid::makeInternal(2ull); // 0x0B
+    vector<Bid> bbtLeafBids;
+    bbtLeafBids.reserve(nBbtLeaves);
+    for (size_t i = 0; i < nBbtLeaves; ++i) {
+        bbtLeafBids.push_back(nextPageBid);
+        nextPageBid = Bid{nextPageBid.value + 4ull};
+    }
+    const Bid bbtRootBid = hasBbtIntermediate ? nextPageBid : bbtLeafBids.front();
+    if (hasBbtIntermediate) nextPageBid = Bid{nextPageBid.value + 4ull};
+
+    vector<Bid> nbtLeafBids;
+    nbtLeafBids.reserve(nNbtLeaves);
+    for (size_t i = 0; i < nNbtLeaves; ++i) {
+        nbtLeafBids.push_back(nextPageBid);
+        nextPageBid = Bid{nextPageBid.value + 4ull};
+    }
+    const Bid nbtRootBid = hasNbtIntermediate ? nextPageBid : nbtLeafBids.front();
+    if (hasNbtIntermediate) nextPageBid = Bid{nextPageBid.value + 4ull};
+
+    // ---- 3. Build BBT pages ----------------------------------------------
+    // BBTENTRYs sorted by BID ascending; partitioned across leaves.
+    vector<BbtEntry> bbtEntries;
+    bbtEntries.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        BbtEntry e;
+        e.bref = Bref{blocks[i].bid, Ib{blockIbs[i]}};
+        e.cb   = blocks[i].cb;
+        e.cRef = 1u;
+        bbtEntries.push_back(e);
+    }
+    std::sort(bbtEntries.begin(), bbtEntries.end(),
+              [](const BbtEntry& a, const BbtEntry& b) {
+                  return a.bref.bid.value < b.bref.bid.value;
+              });
+
+    vector<vector<BbtEntry>> bbtPerLeaf(nBbtLeaves);
+    for (size_t i = 0; i < bbtEntries.size(); ++i) {
+        bbtPerLeaf[i / kBbtMaxEntriesPerLeaf].push_back(bbtEntries[i]);
+    }
+    vector<array<uint8_t, kPageSize>> bbtLeafPages;
+    bbtLeafPages.reserve(nBbtLeaves);
+    vector<BtEntry> bbtIntermediate;
+    bbtIntermediate.reserve(nBbtLeaves);
+    for (size_t i = 0; i < nBbtLeaves; ++i) {
+        bbtLeafPages.push_back(buildBbtLeaf(
+            bbtPerLeaf[i].data(), bbtPerLeaf[i].size(),
+            bbtLeafBids[i], Ib{bbtLeafIbs[i]}));
+        if (!bbtPerLeaf[i].empty()) {
+            const uint64_t btkey = bbtPerLeaf[i].front().bref.bid.value;
+            bbtIntermediate.emplace_back(btkey,
+                Bref{bbtLeafBids[i], Ib{bbtLeafIbs[i]}});
+        }
+    }
+    array<uint8_t, kPageSize> bbtRootPage{};
+    if (hasBbtIntermediate) {
+        bbtRootPage = buildBbtIntermediate(
+            bbtIntermediate.data(), bbtIntermediate.size(),
+            /*cLevel*/ 1u, bbtRootBid, Ib{bbtRootIb});
+    } else {
+        bbtRootPage = bbtLeafPages.front();
+    }
+
+    // ---- 4. Build NBT pages ----------------------------------------------
+    vector<NbtEntry> nbtEntries;
+    nbtEntries.reserve(nodes.size());
+    for (const auto& n : nodes) {
+        nbtEntries.emplace_back(n.nid, n.bidData, n.bidSub, n.nidParent);
+    }
+    std::sort(nbtEntries.begin(), nbtEntries.end(),
+              [](const NbtEntry& a, const NbtEntry& b) {
+                  return a.nid.value < b.nid.value;
+              });
+
+    vector<vector<NbtEntry>> nbtPerLeaf(nNbtLeaves);
+    for (size_t i = 0; i < nbtEntries.size(); ++i) {
+        nbtPerLeaf[i / kNbtLeafMaxEntries].push_back(nbtEntries[i]);
+    }
+    vector<array<uint8_t, kPageSize>> nbtLeafPages;
+    nbtLeafPages.reserve(nNbtLeaves);
+    vector<BtEntry> nbtIntermediate;
+    nbtIntermediate.reserve(nNbtLeaves);
+    for (size_t i = 0; i < nNbtLeaves; ++i) {
+        nbtLeafPages.push_back(buildNbtLeaf(
+            nbtPerLeaf[i].data(), nbtPerLeaf[i].size(),
+            nbtLeafBids[i], Ib{nbtLeafIbs[i]}));
+        if (!nbtPerLeaf[i].empty()) {
+            const uint64_t btkey =
+                static_cast<uint64_t>(nbtPerLeaf[i].front().nid.value);
+            nbtIntermediate.emplace_back(btkey,
+                Bref{nbtLeafBids[i], Ib{nbtLeafIbs[i]}});
+        }
+    }
+    array<uint8_t, kPageSize> nbtRootPage{};
+    if (hasNbtIntermediate) {
+        nbtRootPage = buildBtIntermediate(
+            nbtIntermediate.data(), nbtIntermediate.size(),
+            /*cLevel*/ 1u, ptype::kNBT, nbtRootBid, Ib{nbtRootIb});
+    } else {
+        nbtRootPage = nbtLeafPages.front();
+    }
+
+    // ---- 5. AMap + HEADER ------------------------------------------------
+    const Bid bidAMap = Bid::makeInternal(1ull); // 0x07
+    const auto amap   = buildAMap(bidAMap, Ib{kIbAMap}, ibFileEof);
+
+    WriterState state{};
+    state.dwUnique         = 1u;
+    state.bidNextP         = nextPageBid;
+    state.bidNextB         = Bid::makeData(blocks.size() + 1ull);
+    state.root.ibFileEof   = Ib{ibFileEof};
+    state.root.ibAMapLast  = Ib{kIbAMap};
+    state.root.cbAMapFree  = cbAMapFreeFor(ibFileEof);
+    state.root.cbPMapFree  = 0ull;
+    state.root.fAMapValid  = kAMapValid2;
+    state.root.brefNbt     = Bref{nbtRootBid, Ib{nbtRootIb}};
+    state.root.brefBbt     = Bref{bbtRootBid, Ib{bbtRootIb}};
+    populateFreshRgnid(state);
+
+    const auto header = serializeHeader(state);
+
+    // ---- 6. Write file ---------------------------------------------------
+    FILE* fp = openWb(path);
+    if (fp == nullptr) return fail("fopen failed");
+
+    bool ok = true;
+    uint64_t writtenIb = 0;
+    auto padTo = [&](uint64_t targetIb) {
+        if (targetIb > writtenIb) {
+            const size_t n = static_cast<size_t>(targetIb - writtenIb);
+            const vector<uint8_t> pad(n, uint8_t{0});
+            ok = ok && writeAll(fp, pad.data(), pad.size());
+            writtenIb = targetIb;
+        }
+    };
+    auto emit = [&](const void* data, size_t n) {
+        ok = ok && writeAll(fp, data, n);
+        writtenIb += n;
+    };
+
+    emit(header.data(), header.size());
+    padTo(kIbAMap);
+    emit(amap.data(), amap.size());
+    padTo(kBlocksStart);
+    for (const auto& b : blocks) {
+        emit(b.encodedBlock.data(), b.encodedBlock.size());
+    }
+    // BBT leaves
+    for (size_t i = 0; i < nBbtLeaves; ++i) {
+        if (!hasBbtIntermediate) break; // single-leaf case writes via root below
+        padTo(bbtLeafIbs[i]);
+        emit(bbtLeafPages[i].data(), bbtLeafPages[i].size());
+    }
+    padTo(bbtRootIb);
+    emit(bbtRootPage.data(), bbtRootPage.size());
+    // NBT leaves
+    for (size_t i = 0; i < nNbtLeaves; ++i) {
+        if (!hasNbtIntermediate) break;
+        padTo(nbtLeafIbs[i]);
+        emit(nbtLeafPages[i].data(), nbtLeafPages[i].size());
+    }
+    padTo(nbtRootIb);
+    emit(nbtRootPage.data(), nbtRootPage.size());
+
+    if (std::fclose(fp) != 0) return fail("fclose failed");
+    if (!ok)                  return fail("fwrite truncated");
+    return WriteResult{};
 }
 
 } // namespace pstwriter

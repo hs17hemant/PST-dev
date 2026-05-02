@@ -749,25 +749,6 @@ TEST_CASE("SLBLOCK round-trips [MS-PST] Sec 3.7 sample byte-for-byte",
 // tag. This placeholder is preserved as a comment for traceability.
 
 // Sample shape: minimum end-to-end PST that proves the M5 wiring contract.
-// Build a PST containing exactly:
-//   * one PC node (e.g. NID 0x21 + reserved nidType, message-store-shaped)
-//   * one TC node (e.g. NID 0x122 + reserved nidType, root-folder-hierarchy-shaped)
-//   * NBTENTRYs for both, with bidData pointing to the actual data blocks
-// pst_info should walk the PST and report ZERO orphan blocks (every block
-// is reachable from a NID via the NBT).
-TEST_CASE("End-to-end PST: PC + TC nodes have NBT entries, no orphan blocks",
-          "[ndb][nbt][end_to_end][m5_gate]")
-{
-    SKIP("M5 not implemented yet — M5Allocator + NBT writer + wiring layer are the gate");
-
-    // When M5 lands, the test body should:
-    // 1. Create a temp PST path.
-    // 2. Build the PC bytes via M4 buildPropertyContext().
-    // 3. Build the TC bytes via M4 buildTableContext().
-    // 4. Wire via M5: assign NIDs, register NBTENTRYs, register BBTENTRYs,
-    //    write the PST.
-    // 5. Run pst_info via tools/pst_info_run.hpp.
-    // 6. REQUIRE pst_info exit code == 0 ("ALL CHECKS PASSED").
-    // 7. REQUIRE no "orphan block" warnings in pst_info output.
-    // 8. Re-open the PST, walk the NBT, REQUIRE both PC and TC NIDs resolve.
-}
+// UNLOCKED in M5 Phase D -- the test now lives in tests/test_m5_end_to_end.cpp
+// under the tag [m5][end_to_end][m5_gate]. This placeholder is preserved as
+// a comment for traceability.
