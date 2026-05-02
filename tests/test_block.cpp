@@ -743,20 +743,10 @@ TEST_CASE("SLBLOCK round-trips [MS-PST] Sec 3.7 sample byte-for-byte",
 //   * page IB = 0x8200, page bid = 0x206
 //   * stored wSig = 0x8006, dwCRC = 0x02E8B164 (POSITIVE control: matches)
 //   * ptype = 0x81 (specifically intermediate NBT; format is shared with BBT)
-TEST_CASE("Intermediate BT page round-trips [MS-PST] Sec 3.3 sample byte-for-byte",
-          "[block][bt][golden_spec_bt_intermediate]")
-{
-    SKIP("M5 not implemented yet — buildBtIntermediatePage(...) is the gate");
-
-    // When M5 lands, the test body should:
-    // 1. Load tests/golden/spec_sample_bt_intermediate.bin (512 B).
-    // 2. Decode the 3 BTENTRYs at offsets [0..0x18), [0x18..0x30), [0x30..0x48).
-    //    Each BTENTRY layout per [SPEC sec 2.2.2.7.7.2]: btkey (8 B) + BREF (16 B).
-    // 3. Re-serialize via buildBtIntermediatePage(entries, count, pageBid, pageIb,
-    //    cEntMax=0x14, ptype=0x81 /* NBT */).
-    // 4. REQUIRE byte-for-byte equality across all 512 bytes including the
-    //    stored dwCRC (this is a clean positive control, unlike sec 3.5 / sec 3.7).
-}
+//
+// UNLOCKED in M5 Phase B -- the byte-for-byte round-trip test now lives
+// in tests/test_m5_btpage.cpp under the same [golden_spec_bt_intermediate]
+// tag. This placeholder is preserved as a comment for traceability.
 
 // Sample shape: minimum end-to-end PST that proves the M5 wiring contract.
 // Build a PST containing exactly:

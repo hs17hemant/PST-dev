@@ -37,6 +37,7 @@ add_library(pstwriter STATIC
     src/writer.cpp
     src/ltp.cpp
     src/m5_allocator.cpp
+    src/nbt.cpp
 )
 
 # Two include paths so internal code can write `#include "crc.hpp"`
