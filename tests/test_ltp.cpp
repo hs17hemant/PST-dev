@@ -1,0 +1,346 @@
+// pstwriter/tests/test_ltp.cpp
+//
+// M4 oracle tests — Heap-on-Node (HN), BTH, PropertyContext (PC),
+// TableContext (TC). These tests are the SPEC for M4: each one parses
+// a [MS-PST] §3.x sample byte-dump, verifies the structural fields
+// against the spec annotation, then SKIPS the round-trip half until
+// the corresponding builder is implemented.
+//
+// When M4 lands:
+//   * remove the SKIP() lines and uncomment the round-trip assertions
+//   * the existing `// TODO M4:` markers point to the exact insertion
+//     points
+//
+// Reference: see MILESTONES.md "M4 gate" + KNOWN_UNVERIFIED.md
+// "M4 — LTP layer spec samples" for why CRC self-consistency is N/A
+// for §3.8 / §3.9 / §3.11.
+
+#include <catch2/catch_test_macros.hpp>  // SKIP() macro lives here in Catch2 v3.x
+
+#include "crc.hpp"
+#include "ltp.hpp"
+#include "types.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+using namespace std;
+using namespace pstwriter;
+using detail::readU16;
+using detail::readU32;
+using detail::readU64;
+
+namespace {
+
+bool fileExistsLtp(const string& path)
+{
+    FILE* fp = nullptr;
+#if defined(_MSC_VER)
+    if (fopen_s(&fp, path.c_str(), "rb") != 0 || fp == nullptr) return false;
+#else
+    fp = std::fopen(path.c_str(), "rb");
+    if (fp == nullptr) return false;
+#endif
+    std::fclose(fp);
+    return true;
+}
+
+bool readEntireFileLtp(const string& path, vector<uint8_t>& out)
+{
+    FILE* fp = nullptr;
+#if defined(_MSC_VER)
+    if (fopen_s(&fp, path.c_str(), "rb") != 0 || fp == nullptr) return false;
+#else
+    fp = std::fopen(path.c_str(), "rb");
+    if (fp == nullptr) return false;
+#endif
+    if (std::fseek(fp, 0, SEEK_END) != 0) { std::fclose(fp); return false; }
+    const long sz = std::ftell(fp);
+    if (sz < 0) { std::fclose(fp); return false; }
+    if (std::fseek(fp, 0, SEEK_SET) != 0) { std::fclose(fp); return false; }
+    out.resize(static_cast<size_t>(sz));
+    const size_t got = (sz == 0) ? 0u : std::fread(out.data(), 1, out.size(), fp);
+    std::fclose(fp);
+    return got == out.size();
+}
+
+string locateLtpGolden(const char* leaf)
+{
+    const string candidates[] = {
+        string("tests/golden/") + leaf,
+        string("../tests/golden/") + leaf,
+        string("../../tests/golden/") + leaf,
+        string("../../../tests/golden/") + leaf,
+    };
+    for (const auto& c : candidates) {
+        if (fileExistsLtp(c)) return c;
+    }
+    return string{};
+}
+
+} // namespace
+
+// ============================================================================
+// SPEC ORACLE: [MS-PST] Sec 3.8 — Sample Heap-on-Node (HN).
+//
+// Pre-flight contract:
+//   * 258-byte HN body (no BLOCKTRAILER in spec dump)
+//   * HNHDR at offset 0: ibHnpm=0x00EC, bSig=0xEC, bClientSig=0xBC (PC),
+//                        hidUserRoot=0x00000020
+//   * HNPAGEMAP at offset 0xEC: cAlloc=8, cFree=0,
+//                               rgibAlloc[]={0x0C,0x14,0x6C,0x7C,0x8C,
+//                                            0xA4,0xBC,0xD4,0xEC}
+//
+// M4 round-trip target: feed the parsed allocations back through
+// buildHeapOnNode(...) and assert byte-for-byte match.
+// ============================================================================
+TEST_CASE("HN structured body matches [MS-PST] Sec 3.8 sample (parse-only; M4 round-trip pending)",
+          "[ltp][hn][golden_spec_hn]")
+{
+    const string path = locateLtpGolden("spec_sample_hn.bin");
+    REQUIRE_FALSE(path.empty());
+
+    vector<uint8_t> golden;
+    REQUIRE(readEntireFileLtp(path, golden));
+    REQUIRE(golden.size() == 258u);
+
+    const uint8_t* g = golden.data();
+
+    // ---- HNHDR ([MS-PST] §2.3.1.2) ----
+    REQUIRE(readU16(g, 0)  == 0x00ECu);   // ibHnpm
+    REQUIRE(g[2]           == 0xECu);     // bSig (kHnSignature)
+    REQUIRE(g[3]           == 0xBCu);     // bClientSig (bTypePC)
+    REQUIRE(readU32(g, 4)  == 0x00000020u); // hidUserRoot
+    // rgbFillLevel: 4 bytes holding 8 packed nibbles (one per fill bucket).
+    // For this sample's first HN block, every bucket is FILL_LEVEL_EMPTY=0.
+    // HNHDR total size = 12 bytes; the first user allocation begins at 0x0C.
+    for (size_t i = 8; i < 12; ++i) {
+        REQUIRE(g[i] == 0u);
+    }
+
+    // ---- HNPAGEMAP ([MS-PST] §2.3.1.5) at offset 0xEC ----
+    const size_t hnpm = 0x00EC;
+    REQUIRE(readU16(g, hnpm + 0) == 0x0008u);  // cAlloc
+    REQUIRE(readU16(g, hnpm + 2) == 0x0000u);  // cFree
+
+    // rgibAlloc[cAlloc + 1] = 9 entries × 2 bytes
+    const uint16_t expectedAllocs[9] = {
+        0x000C, 0x0014, 0x006C, 0x007C, 0x008C,
+        0x00A4, 0x00BC, 0x00D4, 0x00EC
+    };
+    for (size_t i = 0; i < 9; ++i) {
+        REQUIRE(readU16(g, hnpm + 4 + i * 2) == expectedAllocs[i]);
+    }
+
+    // ---- Round-trip via buildHeapOnNode(...) ----
+    // Extract every allocation from the golden file and feed them back
+    // through the builder. If our HNHDR / packing / HNPAGEMAP encoding
+    // is correct, the regenerated bytes equal the spec sample exactly.
+    vector<HnAllocation> a(8);
+    for (size_t i = 0; i < 8; ++i) {
+        a[i].data = g + expectedAllocs[i];
+        a[i].size = static_cast<size_t>(expectedAllocs[i + 1]) - expectedAllocs[i];
+    }
+    const auto regen = buildHeapOnNode(a.data(), a.size(),
+                                       /*bClientSig=*/0xBCu,
+                                       /*hidUserRoot=*/0x00000020u);
+    REQUIRE(regen.size() == golden.size());
+    for (size_t i = 0; i < regen.size(); ++i) {
+        if (regen[i] != golden[i]) {
+            INFO("first mismatch at offset 0x" << std::hex << i
+                 << ": regen=" << +regen[i] << " golden=" << +golden[i]);
+            FAIL("byte mismatch in §3.8 HN round-trip");
+        }
+    }
+}
+
+// ============================================================================
+// SPEC ORACLE: [MS-PST] Sec 3.9 — Sample BTH (inside the Sec 3.8 HN).
+//
+// Pre-flight contract:
+//   * BTHHEADER at HN offset 0x0C (the first allocation):
+//       bType=0xB5, cbKey=2, cbEnt=6, bIdxLevels=0, hidRoot=0x00000040
+//   * BTH leaf records at HN offset 0x14 (second allocation, 88 bytes):
+//       11 records × 8 bytes (2-byte key + 6-byte data)
+//
+// M4 round-trip target: feed the parsed records back through
+// buildBth(...) over the §3.8 HN and assert byte-for-byte match.
+// ============================================================================
+TEST_CASE("BTH inside HN matches [MS-PST] Sec 3.9 sample (parse-only; M4 round-trip pending)",
+          "[ltp][bth][golden_spec_bth]")
+{
+    const string path = locateLtpGolden("spec_sample_bth.bin");
+    REQUIRE_FALSE(path.empty());
+
+    vector<uint8_t> golden;
+    REQUIRE(readEntireFileLtp(path, golden));
+    REQUIRE(golden.size() == 258u);
+
+    const uint8_t* g = golden.data();
+
+    // ---- BTHHEADER ([MS-PST] §2.3.2.1) at HN offset 0x0C ----
+    const size_t bthH = 0x0C;
+    REQUIRE(g[bthH + 0]                == 0xB5u);   // bType (kBthSignature)
+    REQUIRE(g[bthH + 1]                == 0x02u);   // cbKey
+    REQUIRE(g[bthH + 2]                == 0x06u);   // cbEnt
+    REQUIRE(g[bthH + 3]                == 0x00u);   // bIdxLevels (leaf-only)
+    REQUIRE(readU32(g, bthH + 4)       == 0x00000040u); // hidRoot
+
+    // ---- BTH leaf records at HN offset 0x14 ----
+    // Per spec: 11 records × 8 bytes = 88 bytes, ending at offset 0x6C.
+    const size_t bthLeaf  = 0x14;
+    const size_t bthEnd   = 0x6C;
+    REQUIRE(bthEnd - bthLeaf == 11u * 8u);
+
+    // Spot-check: keys must be ascending (BTH invariant).
+    uint16_t prev = 0;
+    for (size_t i = 0; i < 11; ++i) {
+        const uint16_t key = readU16(g, bthLeaf + i * 8);
+        REQUIRE(key > prev);
+        prev = key;
+    }
+    // First and last key per the spec dump: 0x0E34, 0x67FF.
+    REQUIRE(readU16(g, bthLeaf + 0u * 8u)  == 0x0E34u);
+    REQUIRE(readU16(g, bthLeaf + 10u * 8u) == 0x67FFu);
+
+    // ---- Round-trip the BTHHEADER via encodeBthHeader(...) ----
+    const auto hdr = encodeBthHeader(/*cbKey=*/2, /*cbEnt=*/6,
+                                     /*bIdxLevels=*/0,
+                                     /*hidRoot=*/0x00000040u);
+    for (size_t i = 0; i < 8; ++i) {
+        REQUIRE(hdr[i] == g[bthH + i]);
+    }
+
+    // ---- Round-trip the entire HN-with-BTH via buildHeapOnNode(...) ----
+    // Per spec, §3.9 IS the §3.8 HN — 8 allocations identical to those
+    // we already extracted. We re-do the extraction here so the test is
+    // standalone (each [golden_spec_*] case can be run independently).
+    const uint16_t expectedAllocs[9] = {
+        0x000C, 0x0014, 0x006C, 0x007C, 0x008C,
+        0x00A4, 0x00BC, 0x00D4, 0x00EC
+    };
+    vector<HnAllocation> a(8);
+    for (size_t i = 0; i < 8; ++i) {
+        a[i].data = g + expectedAllocs[i];
+        a[i].size = static_cast<size_t>(expectedAllocs[i + 1]) - expectedAllocs[i];
+    }
+    const auto regen = buildHeapOnNode(a.data(), a.size(), 0xBCu, 0x00000020u);
+    REQUIRE(regen.size() == golden.size());
+    for (size_t i = 0; i < regen.size(); ++i) {
+        if (regen[i] != golden[i]) {
+            INFO("first mismatch at offset 0x" << std::hex << i
+                 << ": regen=" << +regen[i] << " golden=" << +golden[i]);
+            FAIL("byte mismatch in §3.9 HN-with-BTH round-trip");
+        }
+    }
+}
+
+// ============================================================================
+// SPEC ORACLE: [MS-PST] Sec 3.11 — Sample TableContext (TC).
+//
+// Pre-flight contract:
+//   * 464-byte HN body (no BLOCKTRAILER in spec dump)
+//   * HNHDR: ibHnpm=0x01BC, bSig=0xEC, bClientSig=0x7C (bTypeTC),
+//            hidUserRoot=0x00000040
+//   * HNPAGEMAP at 0x1BC: cAlloc=7, cFree=0, rgibAlloc[8]
+//   * TCINFO at HID 0x40 (allocation 2, offset 0x14): cCols=0x0D,
+//     hnidRows=0x80, hidRowIndex=0x20
+//
+// M4 round-trip target: feed the parsed TC back through
+// buildTableContext(...) and assert byte-for-byte match.
+// ============================================================================
+TEST_CASE("TC structured body matches [MS-PST] Sec 3.11 sample (parse-only; M4 round-trip pending)",
+          "[ltp][tc][golden_spec_tc]")
+{
+    const string path = locateLtpGolden("spec_sample_tc.bin");
+    REQUIRE_FALSE(path.empty());
+
+    vector<uint8_t> golden;
+    REQUIRE(readEntireFileLtp(path, golden));
+    REQUIRE(golden.size() == 464u);
+
+    const uint8_t* g = golden.data();
+
+    // ---- HNHDR ----
+    REQUIRE(readU16(g, 0)  == 0x01BCu);   // ibHnpm
+    REQUIRE(g[2]           == 0xECu);     // bSig
+    REQUIRE(g[3]           == 0x7Cu);     // bClientSig (bTypeTC)
+    REQUIRE(readU32(g, 4)  == 0x00000040u); // hidUserRoot -> TCINFO
+
+    // ---- HNPAGEMAP at offset 0x1BC ----
+    const size_t hnpm = 0x01BC;
+    REQUIRE(readU16(g, hnpm + 0) == 0x0007u);  // cAlloc
+    REQUIRE(readU16(g, hnpm + 2) == 0x0000u);  // cFree
+
+    const uint16_t expectedAllocs[8] = {
+        0x000C, 0x0014, 0x0092, 0x00AA,
+        0x014F, 0x017D, 0x0193, 0x01BB
+    };
+    for (size_t i = 0; i < 8; ++i) {
+        REQUIRE(readU16(g, hnpm + 4 + i * 2) == expectedAllocs[i]);
+    }
+
+    // ---- TCINFO ([MS-PST] §2.3.4.1) at HN offset 0x14 ----
+    // Per spec: bType=0x7C, cCols=0x0D, ... rgib[4], hidRowIndex=0x20,
+    // hnidRows=0x80
+    const size_t tci = 0x14;
+    REQUIRE(g[tci + 0] == 0x7Cu);          // bType (kTcSignature)
+    REQUIRE(g[tci + 1] == 0x0Du);          // cCols (13)
+    // rgib[4]: end offsets within row data for each value class (4xCEB,
+    // 2xCEB, 1xCEB, CEB) — pinned bytes from the spec dump:
+    REQUIRE(readU16(g, tci + 2) == 0x0034u);
+    REQUIRE(readU16(g, tci + 4) == 0x0034u);
+    REQUIRE(readU16(g, tci + 6) == 0x0035u);
+    REQUIRE(readU16(g, tci + 8) == 0x0037u);
+    REQUIRE(readU32(g, tci + 10) == 0x00000020u);  // hidRowIndex
+    REQUIRE(readU32(g, tci + 14) == 0x00000080u);  // hnidRows
+
+    // 13 TCOLDESCs follow, 8 bytes each, starting at tci + 22 = 0x2A.
+
+    // ---- Round-trip via buildHeapOnNode(...) ----
+    // The TC body is just an HN with bClientSig=0x7C and 7 allocations.
+    // Re-extracting + re-encoding is the byte-diff oracle for the HN
+    // foundation of TC (TCINFO/TCOLDESC encoding for *new* TC content
+    // is a separate M4 task — for the spec sample we replay the bytes).
+    // Reuses the expectedAllocs[] array declared above.
+    vector<HnAllocation> a(7);
+    for (size_t i = 0; i < 7; ++i) {
+        a[i].data = g + expectedAllocs[i];
+        a[i].size = static_cast<size_t>(expectedAllocs[i + 1]) - expectedAllocs[i];
+    }
+    const auto regen = buildHeapOnNode(a.data(), a.size(),
+                                       /*bClientSig=*/0x7Cu,
+                                       /*hidUserRoot=*/0x00000040u);
+    REQUIRE(regen.size() == golden.size());
+    for (size_t i = 0; i < regen.size(); ++i) {
+        if (regen[i] != golden[i]) {
+            INFO("first mismatch at offset 0x" << std::hex << i
+                 << ": regen=" << +regen[i] << " golden=" << +golden[i]);
+            FAIL("byte mismatch in §3.11 TC HN round-trip");
+        }
+    }
+}
+
+// ============================================================================
+// Synthetic-PC composition test (M4 gate item 4) — pinned in MILESTONES.md.
+// Marked SKIP() until the M4 builders land. Spec is the *contract*: when
+// this test passes, M4 is done.
+// ============================================================================
+TEST_CASE("Synthetic PC round-trips 7 properties via HN+BTH+subnode (M4 composition oracle)",
+          "[ltp][pc][synthetic_pc_composition]")
+{
+    // Properties (per MILESTONES.md):
+    //   1. PidTagDisplayName    (0x3001 PtypString)   "Synthetic PC Test"
+    //   2. PidTagMessageSize    (0x0E08 PtypInteger32) 0x12345678
+    //   3. PidTagMessageStatus  (0x0E17 PtypInteger32) 0x00000042
+    //   4. PidTagFolderType     (0x3601 PtypInteger32) 1
+    //   5. PidTagBody           (0x1000 PtypString)   "This is a test body..."
+    //   6. 0x6001 (custom)      (PtypMultipleString)  ["alpha","beta","gamma"]
+    //   7. PidTagAttachDataBinary (0x3701 PtypBinary) 5500 bytes 0xA5/0x5A
+    //
+    // The 7th prop (5500 B) exceeds the 3580-byte HN per-allocation limit
+    // and MUST be promoted to a subnode (NID/HNID with high bit set).
+    SKIP("buildPropertyContext(...) and reader path not yet implemented — M4 in progress");
+}

@@ -18,6 +18,8 @@
 #include <cstring>
 #include <string>
 
+using namespace std;
+
 namespace pstwriter {
 
 // ============================================================================
@@ -30,62 +32,62 @@ namespace pstwriter {
 // ============================================================================
 namespace detail {
 
-inline void writeU8(std::uint8_t* buf, std::size_t off, std::uint8_t v) noexcept
+inline void writeU8(uint8_t* buf, size_t off, uint8_t v) noexcept
 {
     buf[off] = v;
 }
 
-inline void writeU16(std::uint8_t* buf, std::size_t off, std::uint16_t v) noexcept
+inline void writeU16(uint8_t* buf, size_t off, uint16_t v) noexcept
 {
-    buf[off + 0] = static_cast<std::uint8_t>( v        & 0xFFu);
-    buf[off + 1] = static_cast<std::uint8_t>((v >> 8 ) & 0xFFu);
+    buf[off + 0] = static_cast<uint8_t>( v        & 0xFFu);
+    buf[off + 1] = static_cast<uint8_t>((v >> 8 ) & 0xFFu);
 }
 
-inline void writeU32(std::uint8_t* buf, std::size_t off, std::uint32_t v) noexcept
+inline void writeU32(uint8_t* buf, size_t off, uint32_t v) noexcept
 {
-    buf[off + 0] = static_cast<std::uint8_t>( v        & 0xFFu);
-    buf[off + 1] = static_cast<std::uint8_t>((v >> 8 ) & 0xFFu);
-    buf[off + 2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
-    buf[off + 3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
+    buf[off + 0] = static_cast<uint8_t>( v        & 0xFFu);
+    buf[off + 1] = static_cast<uint8_t>((v >> 8 ) & 0xFFu);
+    buf[off + 2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+    buf[off + 3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
 }
 
-inline void writeU64(std::uint8_t* buf, std::size_t off, std::uint64_t v) noexcept
+inline void writeU64(uint8_t* buf, size_t off, uint64_t v) noexcept
 {
-    buf[off + 0] = static_cast<std::uint8_t>( v        & 0xFFu);
-    buf[off + 1] = static_cast<std::uint8_t>((v >> 8 ) & 0xFFu);
-    buf[off + 2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
-    buf[off + 3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
-    buf[off + 4] = static_cast<std::uint8_t>((v >> 32) & 0xFFu);
-    buf[off + 5] = static_cast<std::uint8_t>((v >> 40) & 0xFFu);
-    buf[off + 6] = static_cast<std::uint8_t>((v >> 48) & 0xFFu);
-    buf[off + 7] = static_cast<std::uint8_t>((v >> 56) & 0xFFu);
+    buf[off + 0] = static_cast<uint8_t>( v        & 0xFFu);
+    buf[off + 1] = static_cast<uint8_t>((v >> 8 ) & 0xFFu);
+    buf[off + 2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+    buf[off + 3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+    buf[off + 4] = static_cast<uint8_t>((v >> 32) & 0xFFu);
+    buf[off + 5] = static_cast<uint8_t>((v >> 40) & 0xFFu);
+    buf[off + 6] = static_cast<uint8_t>((v >> 48) & 0xFFu);
+    buf[off + 7] = static_cast<uint8_t>((v >> 56) & 0xFFu);
 }
 
-inline std::uint16_t readU16(const std::uint8_t* buf, std::size_t off) noexcept
+inline uint16_t readU16(const uint8_t* buf, size_t off) noexcept
 {
-    return static_cast<std::uint16_t>(
-        static_cast<std::uint16_t>(buf[off + 0])      |
-        static_cast<std::uint16_t>(buf[off + 1]) << 8 );
+    return static_cast<uint16_t>(
+        static_cast<uint16_t>(buf[off + 0])      |
+        static_cast<uint16_t>(buf[off + 1]) << 8 );
 }
 
-inline std::uint32_t readU32(const std::uint8_t* buf, std::size_t off) noexcept
+inline uint32_t readU32(const uint8_t* buf, size_t off) noexcept
 {
-    return  static_cast<std::uint32_t>(buf[off + 0])        |
-           (static_cast<std::uint32_t>(buf[off + 1]) << 8 ) |
-           (static_cast<std::uint32_t>(buf[off + 2]) << 16) |
-           (static_cast<std::uint32_t>(buf[off + 3]) << 24);
+    return  static_cast<uint32_t>(buf[off + 0])        |
+           (static_cast<uint32_t>(buf[off + 1]) << 8 ) |
+           (static_cast<uint32_t>(buf[off + 2]) << 16) |
+           (static_cast<uint32_t>(buf[off + 3]) << 24);
 }
 
-inline std::uint64_t readU64(const std::uint8_t* buf, std::size_t off) noexcept
+inline uint64_t readU64(const uint8_t* buf, size_t off) noexcept
 {
-    return  static_cast<std::uint64_t>(buf[off + 0])        |
-           (static_cast<std::uint64_t>(buf[off + 1]) << 8 ) |
-           (static_cast<std::uint64_t>(buf[off + 2]) << 16) |
-           (static_cast<std::uint64_t>(buf[off + 3]) << 24) |
-           (static_cast<std::uint64_t>(buf[off + 4]) << 32) |
-           (static_cast<std::uint64_t>(buf[off + 5]) << 40) |
-           (static_cast<std::uint64_t>(buf[off + 6]) << 48) |
-           (static_cast<std::uint64_t>(buf[off + 7]) << 56);
+    return  static_cast<uint64_t>(buf[off + 0])        |
+           (static_cast<uint64_t>(buf[off + 1]) << 8 ) |
+           (static_cast<uint64_t>(buf[off + 2]) << 16) |
+           (static_cast<uint64_t>(buf[off + 3]) << 24) |
+           (static_cast<uint64_t>(buf[off + 4]) << 32) |
+           (static_cast<uint64_t>(buf[off + 5]) << 40) |
+           (static_cast<uint64_t>(buf[off + 6]) << 48) |
+           (static_cast<uint64_t>(buf[off + 7]) << 56);
 }
 
 } // namespace detail
@@ -93,39 +95,46 @@ inline std::uint64_t readU64(const std::uint8_t* buf, std::size_t off) noexcept
 // ============================================================================
 // PST format-wide constants
 // ============================================================================
-constexpr std::size_t kPageSize        = 512;   // every page in a PST is 512 B
-constexpr std::size_t kBlockAlignment  = 64;    // blocks are 64-byte aligned
-constexpr std::size_t kMaxBlockPayload = 8176;  // 8176 + 16-byte trailer = 8192
+constexpr size_t kPageSize        = 512;   // every page in a PST is 512 B
+constexpr size_t kBlockAlignment  = 64;    // blocks are 64-byte aligned
+constexpr size_t kMaxBlockPayload = 8176;  // 8176 + 16-byte trailer = 8192
 
-constexpr std::size_t kHeaderOffset      = 0x000;
-constexpr std::size_t kHeaderCopyOffset  = 0x200;
-constexpr std::size_t kFirstAMapOffset   = 0x400;
+// HEADER ([MS-PST] §2.2.2.6, verified against §3.2 sample, SPEC_GROUND_TRUTH).
+// HEADER is 564 bytes (0x000..0x233). There is NO header copy at 0x200 —
+// the bytes at 0x200..0x233 are the *tail* of a single HEADER (bSentinel,
+// bCryptMethod, bidNextB, dwCRCFull, …). Bytes 0x234..0x3FF are zero
+// padding; the first AMap begins at 0x400.
+constexpr size_t kHeaderOffset      = 0x000;
+constexpr size_t kHeaderSize        = 564;   // 0x234
+constexpr size_t kFirstAMapOffset   = 0x400;
 
 // HEADER magic values  ([MS-PST] §2.2.2.6)
-constexpr std::uint32_t kMagicDword   = 0x4E444221u; // "!BDN" (file)
-constexpr std::uint16_t kMagicClient  = 0x4D53u;     // "SM"
-constexpr std::uint16_t kVerUnicode   = 23u;         // wVer for ANSI was 14/15
-constexpr std::uint16_t kVerClient    = 19u;
-constexpr std::uint8_t  kPlatformCreate = 0x01u;
-constexpr std::uint8_t  kPlatformAccess = 0x01u;
-constexpr std::uint8_t  kSentinelByte   = 0x80u;     // HEADER offset 0x1E0
+constexpr uint32_t kMagicDword     = 0x4E444221u; // "!BDN" (file)
+constexpr uint16_t kMagicClient    = 0x4D53u;     // "SM"
+constexpr uint16_t kVerUnicode     = 23u;         // wVer for ANSI was 14/15
+constexpr uint16_t kVerClient      = 19u;
+constexpr uint8_t  kPlatformCreate = 0x01u;
+constexpr uint8_t  kPlatformAccess = 0x01u;
+constexpr uint8_t  kSentinelByte   = 0x80u;       // HEADER offset 0x1E0
 
-// HEADER CRC ranges  ([MS-PST] §2.2.2.6 / §5.3)
-constexpr std::size_t kHdrCrcPartialOff = 0x04;     // where dwCRCPartial is stored
-constexpr std::size_t kHdrCrcPartialBeg = 0x08;     // first byte covered
-constexpr std::size_t kHdrCrcPartialLen = 471;      // bytes [0x08 .. 0x1DE], len = 0x1DF - 0x08 + ... see note
-constexpr std::size_t kHdrCrcFullOff    = 0x1EC;
-constexpr std::size_t kHdrCrcFullBeg    = 0x08;
-constexpr std::size_t kHdrCrcFullLen    = 0x1EC - 0x08; // = 0x1E4 = 484 bytes
-//
-// NOTE: The two CRC ranges are recomputed and asserted exactly in ndb.cpp
-// during M2.  Keep these constants here only as documentation hints; ndb.cpp
-// is the single source of truth for the byte ranges actually fed to crc32().
+// HEADER CRC ranges  ([MS-PST] §2.2.2.6, end-to-end verified against the
+// §3.2 sample header in SPEC_GROUND_TRUTH.md):
+//   dwCRCPartial at 0x004: CRC of bytes [0x008 .. 0x1DF) = 471 bytes
+//   dwCRCFull    at 0x20C: CRC of bytes [0x008 .. 0x20C) = 516 bytes
+// Both verified to reproduce the §3.2 sample's stored CRCs:
+//   crc32(bytes 0x008..0x1DE) == 0x379AA90E (dwCRCPartial)
+//   crc32(bytes 0x008..0x20B) == 0x1FD283D6 (dwCRCFull)
+constexpr size_t kHdrCrcPartialOff = 0x004;
+constexpr size_t kHdrCrcPartialBeg = 0x008;
+constexpr size_t kHdrCrcPartialLen = 471;
+constexpr size_t kHdrCrcFullOff    = 0x20C;
+constexpr size_t kHdrCrcFullBeg    = 0x008;
+constexpr size_t kHdrCrcFullLen    = 516;
 
 // ============================================================================
 // Crypt method  ([MS-PST] §1.3.1.5, §5.1, §5.2)
 // ============================================================================
-enum class CryptMethod : std::uint8_t {
+enum class CryptMethod : uint8_t {
     None    = 0x00, // no encoding; data stored as-is
     Permute = 0x01, // NDB_CRYPT_PERMUTE — default for new files (§5.1)
     Cyclic  = 0x02, // NDB_CRYPT_CYCLIC  (§5.2)
@@ -134,7 +143,7 @@ enum class CryptMethod : std::uint8_t {
 // ============================================================================
 // Node-type values stored in the low 5 bits of an NID  ([MS-PST] §2.2.2.1)
 // ============================================================================
-enum class NidType : std::uint8_t {
+enum class NidType : uint8_t {
     HID                          = 0x00, // not a node — heap id (LTP layer)
     Internal                     = 0x01, // NID_TYPE_INTERNAL (e.g. message store)
     NormalFolder                 = 0x02, // NID_TYPE_NORMAL_FOLDER
@@ -163,17 +172,17 @@ enum class NidType : std::uint8_t {
 //   bits[31:5]  nidIndex (27-bit monotonic counter)
 // ============================================================================
 struct Nid {
-    std::uint32_t value{};
+    uint32_t value{};
 
     constexpr Nid() noexcept = default;
-    constexpr explicit Nid(std::uint32_t raw) noexcept : value(raw) {}
+    constexpr explicit Nid(uint32_t raw) noexcept : value(raw) {}
 
-    constexpr Nid(NidType t, std::uint32_t index) noexcept
-        : value(((index & 0x07FFFFFFu) << 5) | (static_cast<std::uint32_t>(t) & 0x1Fu))
+    constexpr Nid(NidType t, uint32_t idx) noexcept
+        : value(((idx & 0x07FFFFFFu) << 5) | (static_cast<uint32_t>(t) & 0x1Fu))
     {}
 
-    constexpr NidType type()  const noexcept { return static_cast<NidType>(value & 0x1Fu); }
-    constexpr std::uint32_t index() const noexcept { return value >> 5; }
+    constexpr NidType  type()  const noexcept { return static_cast<NidType>(value & 0x1Fu); }
+    constexpr uint32_t index() const noexcept { return value >> 5; }
 
     constexpr bool operator==(const Nid& o) const noexcept { return value == o.value; }
     constexpr bool operator!=(const Nid& o) const noexcept { return value != o.value; }
@@ -195,7 +204,7 @@ constexpr Nid kNidSearchDomainAlternative{ 0x00000241u };
 constexpr Nid kNidSearchDomainObject     { 0x00000261u };
 constexpr Nid kNidSearchGathererQueue    { 0x00000281u };
 constexpr Nid kNidSearchGathererDescriptor{0x000002A1u };
-constexpr Nid kNidWasteBasket            { 0x00000225u }; // search folder (type 0x05? — see §2.4.8)
+constexpr Nid kNidWasteBasket            { 0x00000225u };
 constexpr Nid kNidFinderFolder           { 0x00000242u };
 constexpr Nid kNidSpoolerQueue           { 0x000002E1u };
 
@@ -210,28 +219,28 @@ constexpr Nid kNidSpoolerQueue           { 0x000002E1u };
 // successive BIDs as bid.value += 4.
 // ============================================================================
 struct Bid {
-    std::uint64_t value{};
+    uint64_t value{};
 
     constexpr Bid() noexcept = default;
-    constexpr explicit Bid(std::uint64_t raw) noexcept : value(raw) {}
+    constexpr explicit Bid(uint64_t raw) noexcept : value(raw) {}
 
-    constexpr static Bid makeData(std::uint64_t index) noexcept
+    constexpr static Bid makeData(uint64_t idx) noexcept
     {
         // bit[0] and bit[1] both 0 => external/data block.
-        return Bid{ (index & 0x3FFFFFFFFFFFFFFFull) << 2 };
+        return Bid{ (idx & 0x3FFFFFFFFFFFFFFFull) << 2 };
     }
-    constexpr static Bid makeInternal(std::uint64_t index) noexcept
+    constexpr static Bid makeInternal(uint64_t idx) noexcept
     {
         // bit[1] set => internal block (XBLOCK/XXBLOCK/SLBLOCK/SIBLOCK).
-        // The spec requires bit[1] = 1 for any internal BID.  Bit[0] is also
+        // The spec requires bit[1] = 1 for any internal BID. Bit[0] is also
         // commonly set on internal blocks; pstwriter sets both to be safe and
         // consistent with what Outlook produces.
-        return Bid{ ((index & 0x3FFFFFFFFFFFFFFFull) << 2) | 0x3ull };
+        return Bid{ ((idx & 0x3FFFFFFFFFFFFFFFull) << 2) | 0x3ull };
     }
 
-    constexpr bool isInternal() const noexcept { return (value & 0x2ull) != 0; }
-    constexpr bool isData()     const noexcept { return (value & 0x2ull) == 0; }
-    constexpr std::uint64_t index() const noexcept { return value >> 2; }
+    constexpr bool     isInternal() const noexcept { return (value & 0x2ull) != 0; }
+    constexpr bool     isData()     const noexcept { return (value & 0x2ull) == 0; }
+    constexpr uint64_t index()      const noexcept { return value >> 2; }
 
     constexpr bool operator==(const Bid& o) const noexcept { return value == o.value; }
     constexpr bool operator!=(const Bid& o) const noexcept { return value != o.value; }
@@ -247,10 +256,10 @@ constexpr Bid kBidNil { 0x0000000000000000ull };
 // IB — Byte offset within the PST file (64-bit). [MS-PST] §2.2.2.3
 // ============================================================================
 struct Ib {
-    std::uint64_t value{};
+    uint64_t value{};
 
     constexpr Ib() noexcept = default;
-    constexpr explicit Ib(std::uint64_t raw) noexcept : value(raw) {}
+    constexpr explicit Ib(uint64_t raw) noexcept : value(raw) {}
 
     constexpr bool operator==(const Ib& o) const noexcept { return value == o.value; }
     constexpr bool operator!=(const Ib& o) const noexcept { return value != o.value; }
@@ -281,10 +290,10 @@ static_assert(sizeof(Bref) == 16, "BREF must occupy exactly 16 bytes (Unicode PS
 // FILETIME — Windows 100-ns ticks since 1601-01-01 UTC. 8 bytes on disk.
 // ============================================================================
 struct FileTime {
-    std::uint64_t ticks{}; // 100-ns intervals since 1601-01-01 UTC
+    uint64_t ticks{};
 
     constexpr FileTime() noexcept = default;
-    constexpr explicit FileTime(std::uint64_t v) noexcept : ticks(v) {}
+    constexpr explicit FileTime(uint64_t v) noexcept : ticks(v) {}
 };
 
 static_assert(sizeof(FileTime) == 8, "FileTime must occupy exactly 8 bytes");
@@ -293,7 +302,7 @@ static_assert(sizeof(FileTime) == 8, "FileTime must occupy exactly 8 bytes");
 // Property type (low 16 bits of a PropTag). [MS-OXCDATA] §2.11.1
 // Only the values used by pstwriter are listed here; we add more in M4–M6.
 // ============================================================================
-enum class PropType : std::uint16_t {
+enum class PropType : uint16_t {
     Unspecified  = 0x0000,
     Null         = 0x0001,
     Int16        = 0x0002, // PT_SHORT
@@ -329,17 +338,17 @@ enum class PropType : std::uint16_t {
 // PropTag — 32-bit (id << 16) | type.  [MS-OXCDATA] §2.9
 // ============================================================================
 struct PropTag {
-    std::uint32_t value{};
+    uint32_t value{};
 
     constexpr PropTag() noexcept = default;
-    constexpr explicit PropTag(std::uint32_t raw) noexcept : value(raw) {}
-    constexpr PropTag(std::uint16_t propId, PropType t) noexcept
-        : value((static_cast<std::uint32_t>(propId) << 16) |
-                 static_cast<std::uint32_t>(t))
+    constexpr explicit PropTag(uint32_t raw) noexcept : value(raw) {}
+    constexpr PropTag(uint16_t propId, PropType t) noexcept
+        : value((static_cast<uint32_t>(propId) << 16) |
+                 static_cast<uint32_t>(t))
     {}
 
-    constexpr std::uint16_t id()   const noexcept { return static_cast<std::uint16_t>(value >> 16); }
-    constexpr PropType      type() const noexcept { return static_cast<PropType>(value & 0xFFFFu); }
+    constexpr uint16_t id()   const noexcept { return static_cast<uint16_t>(value >> 16); }
+    constexpr PropType type() const noexcept { return static_cast<PropType>(value & 0xFFFFu); }
 
     constexpr bool operator==(const PropTag& o) const noexcept { return value == o.value; }
     constexpr bool operator!=(const PropTag& o) const noexcept { return value != o.value; }
