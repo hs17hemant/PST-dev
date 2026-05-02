@@ -25,6 +25,15 @@ add_executable(pstwriter_tests
     test_ndb.cpp
     test_block.cpp
     test_ltp.cpp
+    # pst_info source compiled into the test binary so the LTP
+    # end-to-end test can call runPstInfo() directly. We define
+    # PSTWRITER_PST_INFO_NO_MAIN to suppress the binary's main().
+    ${CMAKE_SOURCE_DIR}/tools/pst_info.cpp
+)
+
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/tools/pst_info.cpp
+    PROPERTIES COMPILE_DEFINITIONS PSTWRITER_PST_INFO_NO_MAIN
 )
 
 target_link_libraries(pstwriter_tests
@@ -37,6 +46,7 @@ target_include_directories(pstwriter_tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/include/pstwriter
+        ${CMAKE_SOURCE_DIR}/tools
 )
 
 if(MSVC)
