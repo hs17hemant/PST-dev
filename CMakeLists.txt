@@ -46,6 +46,7 @@ add_library(pstwriter STATIC
     src/contact.cpp
     src/graph_event.cpp
     src/event.cpp
+    src/pst_baseline.cpp
 )
 
 # Two include paths so internal code can write `#include "crc.hpp"`
