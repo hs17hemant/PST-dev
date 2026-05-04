@@ -251,4 +251,31 @@ TcResult buildFolderContentsTc();
 // ============================================================================
 TcResult buildFolderFaiContentsTc();
 
+// ============================================================================
+// buildNameToIdMapPc — emit the §2.4.7 NID_NAME_TO_ID_MAP PC (NID 0x0061).
+//
+// Per [MS-PST] §2.4.7 (Named Property Lookup Map): "the Name-to-ID-Map is a
+// standard PC with some special properties. Specifically, the properties in
+// the PC do not refer to real property identifiers, but instead point to
+// specific data sections of the Name-to-ID-Map."
+//
+// §2.7.1 minimum state for NID 0x0061 = "Empty". M6 emits the 4 well-known
+// stream/count properties, each at zero-length:
+//
+//   0x00010003 PidTagNameidBucketCount   PtypInteger32 = 251 (per §2.4.7
+//                                          Hash Table page; value SHOULD
+//                                          be 251 even when buckets unused)
+//   0x00020102 PidTagNameidStreamGuid    PtypBinary    (empty stream)
+//   0x00030102 PidTagNameidStreamEntry   PtypBinary    (empty stream)
+//   0x00040102 PidTagNameidStreamString  PtypBinary    (empty stream)
+//
+// **Open question (KNOWN_UNVERIFIED)**: §2.4.7 Hash Table page says hash
+// buckets are stored as PC properties at PidTag IDs 0x1000..0x10FA (251
+// total). For an empty Name-to-ID Map, are these 251 zero-length bucket
+// properties also required, or only the 4 stream/count properties? M6 ships
+// the conservative 4-property version; if Outlook rejects at the M6 gate,
+// expand to all 255 properties.
+// ============================================================================
+PcResult buildNameToIdMapPc(Nid firstSubnodeNid);
+
 } // namespace pstwriter

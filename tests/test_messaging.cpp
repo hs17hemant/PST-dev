@@ -684,6 +684,43 @@ TEST_CASE("buildFolderFaiContentsTc produces a Sec 3.12-shaped 17-col empty TC",
 }
 
 // ============================================================================
+// M6.5 — buildNameToIdMapPc round-trip (empty Name-to-ID Map per §2.4.7).
+// ============================================================================
+TEST_CASE("buildNameToIdMapPc emits the 4 well-known empty-state properties",
+          "[m6][name_to_id][m6_gate]")
+{
+    const PcResult result = buildNameToIdMapPc(Nid{0x00000041u});
+    REQUIRE(result.subnodes.empty());
+    REQUIRE_FALSE(result.hnBytes.empty());
+
+    const auto props = readPropertyContext(result.hnBytes.data(),
+                                           result.hnBytes.size());
+    REQUIRE(props.size() == 4u);
+
+    SECTION("PidTagNameidBucketCount (0x0001) — inline = 251 (0xFB)")
+    {
+        const auto* p = findProp(props, 0x0001u);
+        REQUIRE(p != nullptr);
+        REQUIRE(static_cast<uint16_t>(p->propType) == 0x0003u);
+        REQUIRE(p->storage     == ReadPcProp::Storage::Inline);
+        REQUIRE(p->inlineValue == 251u);
+    }
+
+    SECTION("3 stream properties (0x0002 / 0x0003 / 0x0004) — empty PtypBinary")
+    {
+        const uint16_t streamTags[3] = { 0x0002u, 0x0003u, 0x0004u };
+        for (const uint16_t tag : streamTags) {
+            const auto* p = findProp(props, tag);
+            INFO("Stream PidTag = 0x" << std::hex << tag);
+            REQUIRE(p != nullptr);
+            REQUIRE(static_cast<uint16_t>(p->propType) == 0x0102u);
+            REQUIRE(p->storage  == ReadPcProp::Storage::HnAlloc);
+            REQUIRE(p->valueSize == 0u);
+        }
+    }
+}
+
+// ============================================================================
 // M6.1 — EntryID encoder shape verification.
 //
 // Reproduces all 3 §3.10 EntryIDs byte-for-byte from the schema-side

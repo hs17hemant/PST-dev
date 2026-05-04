@@ -341,4 +341,35 @@ TcResult buildFolderFaiContentsTc()
     return buildTableContext(kFaiContentsCols, 17, nullptr, 0);
 }
 
+// ----------------------------------------------------------------------------
+// buildNameToIdMapPc — empty Name-to-ID Map per §2.4.7 + §2.7.1.
+// ----------------------------------------------------------------------------
+PcResult buildNameToIdMapPc(Nid firstSubnodeNid)
+{
+    // PidTagNameidBucketCount: 251 (the "SHOULD" value per §2.4.7 Hash Table).
+    array<uint8_t, 4> bucketCountBytes{};
+    detail::writeU32(bucketCountBytes.data(), 0, 251u);
+
+    // The 3 stream properties hold zero-length values for an empty map.
+    // valueBytes pointer can be nullptr when valueSize == 0; M4
+    // buildPropertyContext handles this case (empty HN allocation).
+
+    PcProperty props[4] = {
+        // 0x00010003 PidTagNameidBucketCount (inline, Int32)
+        { 0x0001u, PropType::Int32,
+          bucketCountBytes.data(), 4u, PropStorageHint::Auto },
+        // 0x00020102 PidTagNameidStreamGuid (HN-stored Binary, 0 bytes)
+        { 0x0002u, PropType::Binary,
+          nullptr, 0u, PropStorageHint::Auto },
+        // 0x00030102 PidTagNameidStreamEntry (HN-stored Binary, 0 bytes)
+        { 0x0003u, PropType::Binary,
+          nullptr, 0u, PropStorageHint::Auto },
+        // 0x00040102 PidTagNameidStreamString (HN-stored Binary, 0 bytes)
+        { 0x0004u, PropType::Binary,
+          nullptr, 0u, PropStorageHint::Auto },
+    };
+
+    return buildPropertyContext(props, 4, firstSubnodeNid);
+}
+
 } // namespace pstwriter

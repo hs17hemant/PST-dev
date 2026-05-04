@@ -335,6 +335,34 @@ or QWORD = 8-byte), update `buildHeapOnNode` accordingly.
 
 ---
 
+## M6 — Messaging Core schemas
+
+### NameToIdMap empty-state property count (§2.4.7 + §2.7.1)
+
+**Status: pre-registered before real-Outlook validation.**
+
+§2.7.1 says NID_NAME_TO_ID_MAP minimum state = "Empty". §2.4.7 (Hash Table sub-page) says the hash table consists of `PidTagNameidBucketCount` (= 251) PLUS 251 hash bucket properties at PidTags 0x1000..0x10FA. For a freshly-created PST with zero named properties registered:
+
+- **(A)** Conservative empty: emit only the 4 well-known stream/count properties (PidTagNameidBucketCount + 3 stream properties), no bucket properties at all. M6 ships this.
+- **(B)** Strict empty: also emit all 251 bucket properties (each as zero-length PtypBinary at 0x1000..0x10FA). 255 properties total.
+- **(C)** Spec-style empty: emit (A) AND set bucket count to 0 (no SHOULD-251 conformance, but minimal property surface).
+
+**Decision for M6**: option (A). Rationale: §2.4.7 says the hash table "is mostly used in avoiding duplicates when attempting to add a new named property" — i.e., the buckets are only meaningful when there are named props to disambiguate. An empty map has no props to hash, so omitting buckets is semantically equivalent. The 251 bucket count is set per spec recommendation; bucket allocations grow on first named-prop insertion.
+
+**Catches it**: Outlook open / scanpst on an M6 PST with NID 0x0061 emitted via `buildNameToIdMapPc()`. If Outlook rejects (likely error: "missing required hash bucket properties"), upgrade to option (B).
+
+### PidTagContainerClass type discrepancy: §2.7 vs §3.12
+
+**Status: pre-registered. Two different spec pages disagree on the propType.**
+
+[MS-PST] §2.7.x "Hierarchy Table Template" (NID 0x060D) lists property `0x3613` as **PtypBinary** (`PidTagContainerClass`, no _W suffix). [MS-PST] §3.12 sample dump shows the SAME column in a per-folder Hierarchy TC as **PtypString** (`0x3613001F`, friendly name `PidTagContainerClass_W`).
+
+**Decision for M6**: emit `PtypString` (0x001F) for both template and per-folder Hierarchy TCs (matches §3.12's actual sample bytes). Rationale: §3.12 is byte-pinned evidence from a real Outlook PST; §2.7's template description may be stale or normative-loose.
+
+**Risk**: real Outlook may reject the template if it strictly expects `0x3613` to be PtypBinary. Verify at M6 real-Outlook gate.
+
+**Catches it**: Outlook open / scanpst on an M6 PST. If `[m6][hierarchy_tc_3_12]` byte-equality against a real-Outlook hierarchy TC fails specifically at the TCOLDESC for 0x3613, swap propType to PtypBinary in the template and keep PtypString in per-folder TCs (one writer with a knob).
+
 ## How to use this file
 
 When validation against real Outlook becomes possible:
