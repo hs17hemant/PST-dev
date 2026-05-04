@@ -159,4 +159,69 @@ struct FolderPcSchema {
 PcResult buildFolderPc(const FolderPcSchema& schema,
                        Nid                   firstSubnodeNid);
 
+// ============================================================================
+// HierarchyTcRow — input to buildFolderHierarchyTc(...).
+//
+// One row per child folder. PidTagLtpRowId is the child folder's NID;
+// the M4 reader walks the parent NBT entry's HierarchyTC and uses each
+// row's RowId to navigate to the child folder's PC.
+//
+// §3.12 evidence: each row's "present" cells are exactly:
+//   LtpRowId, LtpRowVer, DisplayName_W, ContentCount, ContentUnreadCount,
+//   ReplChangenum, Subfolders.
+// The other 6 columns (ReplItemid, ReplVersionhistory, ReplFlags,
+// ContainerClass_W, 0x6635, 0x6636) have CEB bit clear.
+// ============================================================================
+struct HierarchyTcRow {
+    // PidTagLtpRowId — child folder's NID. Required; identifies the row
+    // in the RowIndex BTH and in any cross-table references.
+    Nid rowId;
+
+    // PidTagLtpRowVer — row version counter. Spec allows 0 for creators.
+    uint32_t rowVer {0u};
+
+    // PidTagDisplayName_W — UTF-16-LE bytes of the child folder's name.
+    // Stored as a varlen HN allocation referenced by HID from the row data.
+    const uint8_t* displayNameUtf16le {nullptr};
+    size_t         displayNameSize    {0};
+
+    // PidTagContentCount / ContentUnreadCount — message counts in child folder.
+    uint32_t contentCount       {0u};
+    uint32_t contentUnreadCount {0u};
+
+    // PidTagSubfolders — true iff the child folder itself has children.
+    bool hasSubfolders {false};
+};
+
+// ============================================================================
+// buildFolderHierarchyTc — emit the §3.12-schema Hierarchy TC.
+//
+// Used for: NID_HIERARCHY_TABLE_TEMPLATE (0x060D) + per-folder hierarchy
+// tables (0x012D, 0x802D, 0x804D, 0x806D from §2.7.1).
+//
+// 13-column schema per [SPEC §3.12]:
+//   tag (sorted ascending) | ibData | cbData | iBit
+//   ----------------------------------------------
+//   0x0E300003 ReplItemid          | 20 |   4 |  6
+//   0x0E330014 ReplChangenum       | 24 |   8 |  7
+//   0x0E340102 ReplVersionhistory  | 32 |   4 |  8
+//   0x0E380003 ReplFlags           | 36 |   4 |  9
+//   0x3001001F DisplayName_W       |  8 |   4 |  2
+//   0x36020003 ContentCount        | 12 |   4 |  3
+//   0x36030003 ContentUnreadCount  | 16 |   4 |  4
+//   0x360A000B Subfolders          | 52 |   1 |  5
+//   0x3613001F ContainerClass_W    | 40 |   4 | 10
+//   0x66350003 (PstHiddenCount)    | 44 |   4 | 11
+//   0x66360003 (PstHiddenUnread)   | 48 |   4 | 12
+//   0x67F20003 LtpRowId            |  0 |   4 |  0
+//   0x67F30003 LtpRowVer           |  4 |   4 |  1
+//
+// Per-row endBm = 55 bytes (53 fixed-data + 2-byte CEB).
+//
+// Pass `rowCount = 0` for the empty-table case used by template TCs and
+// by sub-folder Hierarchy tables that have no children.
+// ============================================================================
+TcResult buildFolderHierarchyTc(const HierarchyTcRow* rows,
+                                size_t                rowCount);
+
 } // namespace pstwriter

@@ -165,4 +165,110 @@ PcResult buildFolderPc(const FolderPcSchema& schema,
     return buildPropertyContext(props, 4, firstSubnodeNid);
 }
 
+// ----------------------------------------------------------------------------
+// buildFolderHierarchyTc — 13-column TC matching §3.12 Hierarchy schema.
+// ----------------------------------------------------------------------------
+namespace {
+
+// §3.12 13-column schema (sorted by PidTag-tag ascending — buildTableContext
+// re-sorts internally so caller order is irrelevant; we list in spec order
+// for readability).
+constexpr TcColumn kHierarchyCols[13] = {
+    // PidTag, propType, ibData, cbData, iBit
+    { 0x0E30u, PropType::Int32,    20,  4,  6 },  // ReplItemid
+    { 0x0E33u, PropType::Int64,    24,  8,  7 },  // ReplChangenum (PtypInteger64 0x14)
+    { 0x0E34u, PropType::Binary,   32,  4,  8 },  // ReplVersionhistory (HID)
+    { 0x0E38u, PropType::Int32,    36,  4,  9 },  // ReplFlags
+    { 0x3001u, PropType::Unicode,   8,  4,  2 },  // DisplayName_W (HID)
+    { 0x3602u, PropType::Int32,    12,  4,  3 },  // ContentCount
+    { 0x3603u, PropType::Int32,    16,  4,  4 },  // ContentUnreadCount
+    { 0x360Au, PropType::Boolean,  52,  1,  5 },  // Subfolders
+    { 0x3613u, PropType::Unicode,  40,  4, 10 },  // ContainerClass_W (HID)
+    { 0x6635u, PropType::Int32,    44,  4, 11 },  // (PstHiddenCount)
+    { 0x6636u, PropType::Int32,    48,  4, 12 },  // (PstHiddenUnread)
+    { 0x67F2u, PropType::Int32,     0,  4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,     4,  4,  1 },  // LtpRowVer
+};
+
+// Per-row matrix size derived from rgib (53 fixed + 2 CEB = 55).
+constexpr size_t kHierarchyRowSize = 55;
+// CEB byte count = ceil(13 / 8) = 2.
+constexpr size_t kHierarchyCebSize = 2;
+
+// CEB bit pattern for a "present" row: which columns of the 13 are
+// actually populated. Per §3.12 Row 0 (and the M6 default schema):
+// LtpRowId(0), LtpRowVer(1), DisplayName_W(2), ContentCount(3),
+// ContentUnreadCount(4), Subfolders(5), ReplChangenum(7) — 7 cells set.
+// Bit layout: byte 0 high-bit-first for iBit 0..7; byte 1 high-bit-first
+// for iBit 8..15.
+//   byte 0: iBit 0,1,2,3,4,5,_,7 → 0b11111101 = 0xFD
+//   byte 1: (iBit 8..12 all clear; iBit 13..15 unused) → 0x00
+constexpr uint8_t kHierarchyCebByte0 = 0xFDu;
+constexpr uint8_t kHierarchyCebByte1 = 0x00u;
+
+} // namespace
+
+TcResult buildFolderHierarchyTc(const HierarchyTcRow* rows, size_t rowCount)
+{
+    // Pre-pack each row's 55 bytes. Varlen DisplayName_W cells are slotted
+    // separately as TcVarlenCell entries; the writer patches the row's
+    // 4-byte HID slot at ibData=8 with the assigned HID.
+    vector<array<uint8_t, kHierarchyRowSize>> rowBuffers(rowCount);
+    vector<TcVarlenCell>                      varlenStore;
+    varlenStore.reserve(rowCount);            // 1 varlen cell per row (DisplayName)
+
+    // Per-row varlen cells need stable storage during the buildTableContext
+    // call. We use a flat vector and per-row slices.
+    vector<TcRow>          tcRows(rowCount);
+    vector<vector<TcVarlenCell>> perRowVarlen(rowCount);
+
+    for (size_t r = 0; r < rowCount; ++r) {
+        const HierarchyTcRow& src = rows[r];
+        uint8_t* dst = rowBuffers[r].data();
+        std::memset(dst, 0, kHierarchyRowSize);
+
+        // Bytes 0..3:   LtpRowId
+        detail::writeU32(dst,  0, src.rowId.value);
+        // Bytes 4..7:   LtpRowVer
+        detail::writeU32(dst,  4, src.rowVer);
+        // Bytes 8..11:  DisplayName_W HID (placeholder; writer patches)
+        // Bytes 12..15: ContentCount
+        detail::writeU32(dst, 12, src.contentCount);
+        // Bytes 16..19: ContentUnreadCount
+        detail::writeU32(dst, 16, src.contentUnreadCount);
+        // Bytes 20..23: ReplItemid (zero, CEB clear)
+        // Bytes 24..31: ReplChangenum (zero, CEB set per §3.12)
+        // Bytes 32..35: ReplVersionhistory HID (zero, CEB clear)
+        // Bytes 36..39: ReplFlags (zero, CEB clear)
+        // Bytes 40..43: ContainerClass_W HID (zero, CEB clear)
+        // Bytes 44..47: 0x6635 (zero, CEB clear)
+        // Bytes 48..51: 0x6636 (zero, CEB clear)
+        // Byte  52:     Subfolders
+        dst[52] = src.hasSubfolders ? 1u : 0u;
+        // Bytes 53..54: CEB
+        dst[53] = kHierarchyCebByte0;
+        dst[54] = kHierarchyCebByte1;
+
+        // Find the column-index of DisplayName_W in our schema (its
+        // colIndex is the position in kHierarchyCols, which is sorted by
+        // tag ascending — DisplayName tag 0x3001001F is at index 4).
+        constexpr size_t kDisplayNameColIdx = 4;
+
+        if (src.displayNameUtf16le != nullptr && src.displayNameSize > 0) {
+            perRowVarlen[r].push_back({ kDisplayNameColIdx,
+                                        src.displayNameUtf16le,
+                                        src.displayNameSize });
+        }
+
+        tcRows[r].rowId       = src.rowId.value;
+        tcRows[r].rowBytes    = rowBuffers[r].data();
+        tcRows[r].rowSize     = kHierarchyRowSize;
+        tcRows[r].varlenCells = perRowVarlen[r].data();
+        tcRows[r].varlenCount = perRowVarlen[r].size();
+    }
+
+    return buildTableContext(kHierarchyCols, 13,
+                             tcRows.data(), rowCount);
+}
+
 } // namespace pstwriter
