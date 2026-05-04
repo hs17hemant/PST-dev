@@ -23,9 +23,11 @@
 
 #include "ltp.hpp"
 #include "types.hpp"
+#include "writer.hpp"   // for WriteResult (writeM6Pst return type)
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace pstwriter {
 
@@ -354,5 +356,43 @@ PcResult buildSearchFolderPc(const FolderPcSchema& schema,
 // block payload. Real-Outlook validation may reveal a different shape.
 // ============================================================================
 std::vector<uint8_t> buildEmptyNodePayload();
+
+// ============================================================================
+// M6 Phase D — writeM6Pst end-to-end PST writer.
+//
+// Assembles all 27 §2.7.1 mandatory nodes into a single PST file. Calls
+// the M5 plumbing (writeM5Pst) under the hood with the M6 builders'
+// outputs as data-block payloads.
+//
+// Layout:
+//   * Each PC/TC's HN body is wrapped in buildDataBlock(...) and laid out
+//     at sequential 64-byte-aligned IBs starting at 0x600.
+//   * Bare nodes (0x01E1, 0x0201) have a 4-byte zero payload.
+//   * Block BIDs assigned sequentially via Bid::makeData(i+1) for
+//     i in 0..26.
+//
+// nidParent wiring (per [SPEC §3.12] + [DESIGN]):
+//   * NID_ROOT_FOLDER (0x122)            → self (0x122)
+//   * Sub-folder PCs (0x2223, 0x8022,
+//                     0x8042)            → Root (0x122)
+//   * Deleted Items (0x8062)             → IPM Subtree (0x8022)
+//   * All sibling tables / templates /
+//     bare nodes / Message Store /
+//     NameToIdMap                        → 0 (no parent)
+//
+// Hierarchy table contents:
+//   * Root Folder Hierarchy (0x12D): 3 rows for Spam Search / IPM Subtree /
+//     Finder, matching §3.12 sample.
+//   * IPM Subtree Hierarchy (0x802D): 0 rows in M6 (KNOWN_UNVERIFIED:
+//     §2.7.1 says "2 Rows" minimum but doesn't list specific children).
+//   * All other Hierarchy tables: 0 rows.
+//   * All Contents / FAI tables: 0 rows.
+// ============================================================================
+struct M6PstConfig {
+    std::string             path;
+    std::array<uint8_t, 16> providerUid;
+};
+
+WriteResult writeM6Pst(const M6PstConfig& config) noexcept;
 
 } // namespace pstwriter

@@ -9,11 +9,15 @@
 
 #include "messaging.hpp"
 
+#include "block.hpp"
 #include "ltp.hpp"
 #include "types.hpp"
+#include "writer.hpp"
 
 #include <array>
 #include <cstring>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -445,6 +449,193 @@ PcResult buildSearchFolderPc(const FolderPcSchema& schema,
 vector<uint8_t> buildEmptyNodePayload()
 {
     return vector<uint8_t>(4u, 0u);
+}
+
+// ----------------------------------------------------------------------------
+// writeM6Pst — Phase D end-to-end PST writer.
+//
+// Assembles the 27 §2.7.1 mandatory nodes and dispatches to writeM5Pst.
+// Internally:
+//   1. Builds each node's HN body / payload.
+//   2. Allocates Bid::makeData(i+1) per block.
+//   3. Wraps each in buildDataBlock at sequential 64-byte-aligned IBs.
+//   4. Composes M5DataBlockSpec + M5Node lists with proper nidParent wiring.
+//   5. Calls writeM5Pst.
+// ----------------------------------------------------------------------------
+namespace {
+
+// Encode an ASCII C-string as UTF-16-LE bytes (no terminator, no BOM).
+// Used for default folder display names.
+vector<uint8_t> utf16leAscii(const char* s)
+{
+    vector<uint8_t> out;
+    while (*s) {
+        out.push_back(static_cast<uint8_t>(*s));
+        out.push_back(0u);
+        ++s;
+    }
+    return out;
+}
+
+// One node's logical body + wiring metadata.
+struct M6NodeBuild {
+    Nid             nid;
+    Nid             nidParent;
+    vector<uint8_t> body;   // HN bytes (PC/TC) or raw payload (bare node)
+};
+
+} // namespace
+
+WriteResult writeM6Pst(const M6PstConfig& config) noexcept
+{
+    try {
+        // Default UTF-16-LE display names — caller knobs added later as M6
+        // gains config surface.
+        const auto nameTopOfPersonal = utf16leAscii("Top of Personal Folders");
+        const auto nameSearchRoot    = utf16leAscii("Search Root");
+        const auto nameSpamSearch    = utf16leAscii("Spam Search Folder");
+        const auto nameDeletedItems  = utf16leAscii("Deleted Items");
+
+        // firstSubnodeNid required by buildPropertyContext but unused for
+        // M6 schemas (no oversize props promote to subnode). Use a non-HID
+        // NID outside the §2.4.1 reserved set.
+        const Nid kDummySub{0x00000041u};
+
+        vector<M6NodeBuild> nodes;
+        nodes.reserve(27);
+
+        // ---- Helper to append a PC node ----
+        auto pushPc = [&](Nid nid, Nid parent, PcResult&& r) {
+            if (!r.subnodes.empty()) {
+                throw std::logic_error(
+                    "writeM6Pst: M6 PC unexpectedly produced subnodes");
+            }
+            nodes.push_back({ nid, parent, std::move(r.hnBytes) });
+        };
+        auto pushTc = [&](Nid nid, Nid parent, TcResult&& r) {
+            nodes.push_back({ nid, parent, std::move(r.hnBytes) });
+        };
+
+        // ---- 1. Message Store PC (0x21) ----
+        MessageStoreSchema mss{};
+        mss.providerUid = config.providerUid;
+        pushPc(Nid{0x00000021u}, Nid{0u}, buildMessageStorePc(mss, kDummySub));
+
+        // ---- 2. NameToIdMap PC (0x61) ----
+        pushPc(Nid{0x00000061u}, Nid{0u}, buildNameToIdMapPc(kDummySub));
+
+        // ---- 3. Root Folder PC (0x122; nidParent = self) ----
+        FolderPcSchema rootSchema{};
+        rootSchema.hasSubfolders = true;
+        pushPc(Nid{0x00000122u}, Nid{0x00000122u},
+               buildFolderPc(rootSchema, kDummySub));
+
+        // ---- 4. Root Folder Hierarchy TC (0x12D) — 3 rows per §3.12 ----
+        HierarchyTcRow rootHier[3];
+        rootHier[0].rowId              = Nid{0x00002223u};
+        rootHier[0].displayNameUtf16le = nameSpamSearch.data();
+        rootHier[0].displayNameSize    = nameSpamSearch.size();
+        rootHier[0].hasSubfolders      = false;
+        rootHier[1].rowId              = Nid{0x00008022u};
+        rootHier[1].displayNameUtf16le = nameTopOfPersonal.data();
+        rootHier[1].displayNameSize    = nameTopOfPersonal.size();
+        rootHier[1].hasSubfolders      = true;   // IPM contains Deleted Items
+        rootHier[2].rowId              = Nid{0x00008042u};
+        rootHier[2].displayNameUtf16le = nameSearchRoot.data();
+        rootHier[2].displayNameSize    = nameSearchRoot.size();
+        rootHier[2].hasSubfolders      = false;
+        pushTc(Nid{0x0000012Du}, Nid{0u}, buildFolderHierarchyTc(rootHier, 3));
+
+        // ---- 5. Root Folder Contents TC (0x12E) ----
+        pushTc(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc());
+        // ---- 6. Root Folder FAI Contents TC (0x12F) ----
+        pushTc(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc());
+
+        // ---- 7. SearchManagementQueue (bare, 0x1E1) ----
+        nodes.push_back({ Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload() });
+        // ---- 8. SearchActivityList (bare, 0x201) ----
+        nodes.push_back({ Nid{0x00000201u}, Nid{0u}, buildEmptyNodePayload() });
+
+        // ---- 9-12. Templates ----
+        pushTc(Nid{0x0000060Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000060Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000060Fu}, Nid{0u}, buildFolderFaiContentsTc());
+        pushTc(Nid{0x00000610u}, Nid{0u}, buildSearchContentsTemplateTc());
+
+        // ---- 13. Attachment Template (0x671) ----
+        pushTc(Nid{0x00000671u}, Nid{0u}, buildAttachmentTemplateTc());
+        // ---- 14. Recipient Template (0x692) ----
+        pushTc(Nid{0x00000692u}, Nid{0u}, buildRecipientTemplateTc());
+
+        // ---- 15. Spam Search Folder PC (0x2223; parent = Root) ----
+        FolderPcSchema spamSchema{};
+        spamSchema.displayNameUtf16le = nameSpamSearch.data();
+        spamSchema.displayNameSize    = nameSpamSearch.size();
+        pushPc(Nid{0x00002223u}, Nid{0x00000122u},
+               buildSearchFolderPc(spamSchema, kDummySub));
+
+        // ---- 16-19. IPM Subtree (0x8022; parent = Root) + tables ----
+        FolderPcSchema ipmSchema{};
+        ipmSchema.displayNameUtf16le = nameTopOfPersonal.data();
+        ipmSchema.displayNameSize    = nameTopOfPersonal.size();
+        ipmSchema.hasSubfolders      = true;   // contains Deleted Items
+        pushPc(Nid{0x00008022u}, Nid{0x00000122u},
+               buildFolderPc(ipmSchema, kDummySub));
+        pushTc(Nid{0x0000802Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000802Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000802Fu}, Nid{0u}, buildFolderFaiContentsTc());
+
+        // ---- 20-23. Search Root / Finder (0x8042; parent = Root) + tables ----
+        FolderPcSchema finderSchema{};
+        finderSchema.displayNameUtf16le = nameSearchRoot.data();
+        finderSchema.displayNameSize    = nameSearchRoot.size();
+        pushPc(Nid{0x00008042u}, Nid{0x00000122u},
+               buildFolderPc(finderSchema, kDummySub));
+        pushTc(Nid{0x0000804Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000804Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000804Fu}, Nid{0u}, buildFolderFaiContentsTc());
+
+        // ---- 24-27. Deleted Items (0x8062; parent = IPM Subtree) + tables ----
+        FolderPcSchema deletedSchema{};
+        deletedSchema.displayNameUtf16le = nameDeletedItems.data();
+        deletedSchema.displayNameSize    = nameDeletedItems.size();
+        pushPc(Nid{0x00008062u}, Nid{0x00008022u},
+               buildFolderPc(deletedSchema, kDummySub));
+        pushTc(Nid{0x0000806Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000806Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000806Fu}, Nid{0u}, buildFolderFaiContentsTc());
+
+        if (nodes.size() != 27u) {
+            return { false, "writeM6Pst: internal — expected 27 nodes" };
+        }
+
+        // ---- Encode each node's payload as a data block ----
+        // Block layout starts at 0x600 (matches writeM5Pst's expectation).
+        // BIDs assigned sequentially as Bid::makeData(i+1).
+        constexpr uint64_t kBlocksStart = 0x600u;
+        vector<M5DataBlockSpec> blocks;
+        vector<M5Node>          m5nodes;
+        blocks.reserve(27);
+        m5nodes.reserve(27);
+
+        uint64_t cursorIb = kBlocksStart;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const Bid bid = Bid::makeData(static_cast<uint64_t>(i + 1));
+            const auto encoded = buildDataBlock(
+                nodes[i].body.data(), nodes[i].body.size(),
+                bid, Ib{cursorIb}, CryptMethod::Permute);
+            blocks.push_back({ bid, encoded,
+                               static_cast<uint16_t>(nodes[i].body.size()) });
+            m5nodes.push_back({ nodes[i].nid, bid, Bid{0u}, nodes[i].nidParent });
+            cursorIb += encoded.size();
+        }
+
+        return writeM5Pst(config.path, blocks, m5nodes);
+    } catch (const std::exception& e) {
+        return { false, std::string("writeM6Pst: ") + e.what() };
+    } catch (...) {
+        return { false, "writeM6Pst: unknown exception" };
+    }
 }
 
 } // namespace pstwriter

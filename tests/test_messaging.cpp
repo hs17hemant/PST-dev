@@ -17,11 +17,18 @@
 
 #include "ltp.hpp"
 #include "messaging.hpp"
+#include "nbt.hpp"
 #include "types.hpp"
+#include "writer.hpp"
+
+#include "pst_info_run.hpp"
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 
 using namespace std;
@@ -854,6 +861,130 @@ TEST_CASE("buildEmptyNodePayload returns 4 zero bytes",
     REQUIRE(payload.size() == 4u);
     for (size_t i = 0; i < 4; ++i) {
         REQUIRE(payload[i] == 0u);
+    }
+}
+
+// ============================================================================
+// M6 Phase D — writeM6Pst end-to-end gate test.
+//
+// Builds a complete §2.7.1-mandatory-nodes PST. Verifies:
+//   * pst_info reports ALL CHECKS PASSED (no orphan blocks; CRCs valid).
+//   * NBT walk yields exactly 27 NIDs matching the §2.7.1 set.
+//   * Each NID resolves via nbtFind() to a real block on disk.
+//   * Specific-NID nidParent wiring matches the M6 design rules
+//     (Root self-ref, sub-folders → Root, Deleted Items → IPM Subtree).
+//
+// **NOTE**: Real-Outlook gate (does Outlook open the produced PST?) is
+// Phase E — requires a Windows Outlook installation. This Phase D test
+// only validates internal consistency.
+// ============================================================================
+namespace {
+std::string m6TempPath(const char* leaf)
+{
+    const char* dir = std::getenv("TMP");
+    if (dir == nullptr) dir = std::getenv("TEMP");
+    if (dir == nullptr) dir = ".";
+    std::string p = dir;
+    if (!p.empty() && p.back() != '/' && p.back() != '\\') p += '/';
+    p += leaf;
+    return p;
+}
+bool readEntirePstM6(const std::string& path, std::vector<uint8_t>& out)
+{
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return false;
+    std::fseek(fp, 0, SEEK_END);
+    long sz = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    out.resize(static_cast<size_t>(sz));
+    const size_t got = std::fread(out.data(), 1, out.size(), fp);
+    std::fclose(fp);
+    return got == out.size();
+}
+} // namespace
+
+TEST_CASE("writeM6Pst assembles all 27 Sec 2.7.1 nodes; pst_info passes",
+          "[m6][end_to_end][m6_gate]")
+{
+    M6PstConfig cfg{};
+    cfg.path = m6TempPath("m6_full_pst.pst");
+    // Use the §3.10 sample's ProviderUID for determinism across test runs.
+    cfg.providerUid = {{
+        0x22, 0x9D, 0xB5, 0x0A, 0xDC, 0xD9, 0x94, 0x43,
+        0x85, 0xDE, 0x90, 0xAE, 0xB0, 0x7D, 0x12, 0x70,
+    }};
+
+    const auto wr = writeM6Pst(cfg);
+    INFO("writeM6Pst result: " << wr.message);
+    REQUIRE(wr.ok);
+
+    SECTION("pst_info reports ALL CHECKS PASSED")
+    {
+        const int rc = runPstInfo(cfg.path);
+        REQUIRE(rc == 0);
+    }
+
+    SECTION("NBT walk yields exactly 27 NIDs from Sec 2.7.1")
+    {
+        std::vector<uint8_t> fileBytes;
+        REQUIRE(readEntirePstM6(cfg.path, fileBytes));
+
+        // ROOT.brefNbt at HEADER+0xB4+0x24 = 0xD8.
+        Bref nbtRoot;
+        nbtRoot.bid = Bid{detail::readU64(fileBytes.data(), 0xD8)};
+        nbtRoot.ib  = Ib {detail::readU64(fileBytes.data(), 0xD8 + 8)};
+
+        std::vector<NbtRecord> all;
+        nbtForEach(fileBytes.data(), fileBytes.size(), nbtRoot, all);
+        REQUIRE(all.size() == 27u);
+
+        const uint32_t expectedNids[27] = {
+            0x0021, 0x0061, 0x0122, 0x012D, 0x012E, 0x012F,
+            0x01E1, 0x0201,
+            0x060D, 0x060E, 0x060F, 0x0610, 0x0671, 0x0692,
+            0x2223,
+            0x8022, 0x802D, 0x802E, 0x802F,
+            0x8042, 0x804D, 0x804E, 0x804F,
+            0x8062, 0x806D, 0x806E, 0x806F,
+        };
+        std::set<uint32_t> seen;
+        for (const auto& r : all) seen.insert(r.nid.value);
+        for (uint32_t n : expectedNids) {
+            INFO("expected NID 0x" << std::hex << n);
+            REQUIRE(seen.count(n) == 1u);
+        }
+    }
+
+    SECTION("nidParent wiring: Root self-ref + sub-folders point to parents")
+    {
+        std::vector<uint8_t> fileBytes;
+        REQUIRE(readEntirePstM6(cfg.path, fileBytes));
+        Bref nbtRoot;
+        nbtRoot.bid = Bid{detail::readU64(fileBytes.data(), 0xD8)};
+        nbtRoot.ib  = Ib {detail::readU64(fileBytes.data(), 0xD8 + 8)};
+
+        auto findParent = [&](uint32_t nidVal) -> uint32_t {
+            NbtRecord rec;
+            REQUIRE(nbtFind(fileBytes.data(), fileBytes.size(),
+                            nbtRoot, Nid{nidVal}, &rec));
+            return rec.nidParent.value;
+        };
+
+        // Root → self
+        REQUIRE(findParent(0x0122u) == 0x0122u);
+        // Sub-folders of Root
+        REQUIRE(findParent(0x2223u) == 0x0122u);   // Spam
+        REQUIRE(findParent(0x8022u) == 0x0122u);   // IPM Subtree
+        REQUIRE(findParent(0x8042u) == 0x0122u);   // Finder
+        // Deleted Items → IPM Subtree
+        REQUIRE(findParent(0x8062u) == 0x8022u);
+        // Sibling tables, templates, bare nodes, message store, NameToIdMap → 0
+        REQUIRE(findParent(0x0021u) == 0u);
+        REQUIRE(findParent(0x0061u) == 0u);
+        REQUIRE(findParent(0x012Du) == 0u);
+        REQUIRE(findParent(0x01E1u) == 0u);
+        REQUIRE(findParent(0x060Du) == 0u);
+        REQUIRE(findParent(0x0671u) == 0u);
     }
 }
 
