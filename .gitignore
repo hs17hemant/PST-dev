@@ -28,13 +28,13 @@ Testing/
 !tests/golden/*.pst
 
 # --- Working notes that should not ship ---
-HANDOFF.md
-SPEC_BRIEF.md
-SPEC_VERIFIED.md
-SPEC_GROUND_TRUTH.md
-KNOWN_UNVERIFIED.md
-MILESTONES.md
-Claude/
+# HANDOFF.md
+# SPEC_BRIEF.md
+# SPEC_VERIFIED.md
+# SPEC_GROUND_TRUTH.md
+# KNOWN_UNVERIFIED.md
+# MILESTONES.md
+# Claude/
 
 # --- Local debug scratch (probes, throwaway PSTs, ad-hoc binaries) ---
 .tmp/
