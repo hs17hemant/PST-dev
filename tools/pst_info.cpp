@@ -547,11 +547,14 @@ int runPstInfo(const string& path)
                 if (blockIb + totalCb > file.size()) {
                     char msg[160];
                     std::snprintf(msg, sizeof(msg),
-                                  "%s entry %zu (bid=0x%llX) ib=0x%llX cb=%u "
-                                  "extends past EOF",
-                                  tag.c_str(), i,
-                                  static_cast<unsigned long long>(blockBid),
-                                  static_cast<unsigned long long>(blockIb),
+                                  "%s entry %lu (bid=0x%08X%08X) "
+                                  "ib=0x%08X%08X cb=%u extends past EOF",
+                                  tag.c_str(),
+                                  static_cast<unsigned long>(i),
+                                  static_cast<unsigned>((blockBid >> 32) & 0xFFFFFFFFu),
+                                  static_cast<unsigned>(blockBid & 0xFFFFFFFFu),
+                                  static_cast<unsigned>((blockIb  >> 32) & 0xFFFFFFFFu),
+                                  static_cast<unsigned>(blockIb  & 0xFFFFFFFFu),
                                   static_cast<unsigned>(cb));
                     log.fail(msg);
                     ++blockCrcFails;
@@ -560,18 +563,24 @@ int runPstInfo(const string& path)
                 const uint8_t* blk = file.data() + blockIb;
                 const uint32_t storedCRC =
                     readU32(blk, totalCb - kBlockTrailerSize + 4);
+                // [MS-PST] §2.2.2.8.1: dwCRC scope is `cb` bytes only,
+                // NOT including 64-byte alignment padding. (Empirically
+                // verified against backup.pst on 2026-05-04.)
                 const uint32_t recomputedCRC =
-                    crc32(blk, totalCb - kBlockTrailerSize);
+                    crc32(blk, cb);
                 if (storedCRC == recomputedCRC) {
                     ++verifiedBlockCRCs;
                 } else {
                     char msg[200];
                     std::snprintf(msg, sizeof(msg),
-                                  "%s block bid=0x%llX ib=0x%llX CRC mismatch "
+                                  "%s block bid=0x%08X%08X "
+                                  "ib=0x%08X%08X CRC mismatch "
                                   "(stored=0x%08X computed=0x%08X)",
                                   tag.c_str(),
-                                  static_cast<unsigned long long>(blockBid),
-                                  static_cast<unsigned long long>(blockIb),
+                                  static_cast<unsigned>((blockBid >> 32) & 0xFFFFFFFFu),
+                                  static_cast<unsigned>(blockBid & 0xFFFFFFFFu),
+                                  static_cast<unsigned>((blockIb  >> 32) & 0xFFFFFFFFu),
+                                  static_cast<unsigned>(blockIb  & 0xFFFFFFFFu),
                                   storedCRC, recomputedCRC);
                     log.fail(msg);
                     ++blockCrcFails;
@@ -589,8 +598,10 @@ int runPstInfo(const string& path)
                 if (childIb + kPageSize > file.size()) {
                     char msg[120];
                     std::snprintf(msg, sizeof(msg),
-                                  "BBT child page %zu ib=0x%llX past EOF",
-                                  i, static_cast<unsigned long long>(childIb));
+                                  "BBT child page %lu ib=0x%08X%08X past EOF",
+                                  static_cast<unsigned long>(i),
+                                  static_cast<unsigned>((childIb >> 32) & 0xFFFFFFFFu),
+                                  static_cast<unsigned>(childIb & 0xFFFFFFFFu));
                     log.fail(msg);
                     continue;
                 }
@@ -603,16 +614,19 @@ int runPstInfo(const string& path)
                     log.fail("BBT child leaf page CRC mismatch");
                 }
                 char tag[32];
-                std::snprintf(tag, sizeof(tag), "BBT[%zu]", i);
+                std::snprintf(tag, sizeof(tag), "BBT[%lu]",
+                              static_cast<unsigned long>(i));
                 verifyLeaf(child, tag);
             }
         }
 
         char summary[160];
         std::snprintf(summary, sizeof(summary),
-                      "BBT walked: %zu entries, %zu block CRCs verified, "
-                      "%zu mismatches",
-                      totalBbtEntries, verifiedBlockCRCs, blockCrcFails);
+                      "BBT walked: %lu entries, %lu block CRCs verified, "
+                      "%lu mismatches",
+                      static_cast<unsigned long>(totalBbtEntries),
+                      static_cast<unsigned long>(verifiedBlockCRCs),
+                      static_cast<unsigned long>(blockCrcFails));
         if (blockCrcFails == 0) {
             log.pass(summary);
         } else {
@@ -661,17 +675,19 @@ int runPstInfo(const string& path)
         if (hnFound > 0) {
             char ltpSummary[160];
             std::snprintf(ltpSummary, sizeof(ltpSummary),
-                          "LTP walked: %zu HN block(s) — %zu PC, %zu TC",
-                          hnFound, pcFound, tcFound);
+                          "LTP walked: %lu HN block(s) - %lu PC, %lu TC",
+                          static_cast<unsigned long>(hnFound),
+                          static_cast<unsigned long>(pcFound),
+                          static_cast<unsigned long>(tcFound));
             log.pass(ltpSummary);
         } else if (!dataBlocks.empty()) {
             // PSTs with data blocks but no LTP (e.g. M3 test PSTs full
             // of synthetic byte payloads) — not a failure, just a note.
             char info[120];
             std::snprintf(info, sizeof(info),
-                          "LTP scan: 0 HN blocks among %zu data block(s) "
+                          "LTP scan: 0 HN blocks among %lu data block(s) "
                           "(no LTP content detected)",
-                          dataBlocks.size());
+                          static_cast<unsigned long>(dataBlocks.size()));
             log.pass(info);
         }
     }

@@ -62,8 +62,10 @@ vector<uint8_t> buildInternalBlock(uint8_t        btype,
     // Bytes [bodyBytes .. totalSize - 16) are zero padding.
 
     // BLOCKTRAILER goes in the last 16 bytes. cb is the LOGICAL body size.
+    // [MS-PST] §2.2.2.8.1: dwCRC is the CRC of `cb` bytes of raw data, NOT
+    // including the alignment padding. Scope = bodyBytes, not trailerOff.
     const size_t trailerOff = totalSize - kBlockTrailerSize;
-    const uint32_t dwCRC = crc32(p, trailerOff);
+    const uint32_t dwCRC = crc32(p, bodyBytes);
 
     writeU16(p, trailerOff + 0, static_cast<uint16_t>(bodyBytes));
     writeU16(p, trailerOff + 2, computeBlockSig(bid, ib));
@@ -97,10 +99,12 @@ vector<uint8_t> buildDataBlock(const uint8_t* payload,
     const uint32_t cyclicKey = static_cast<uint32_t>(bid.value & 0xFFFFFFFFull);
     encodeBlock(buf.data(), cbPayload, method, cyclicKey);
 
-    // Trailer CRC covers the bytes that will sit on disk (encrypted
-    // payload + zero padding), NOT the trailer itself.
+    // [MS-PST] §2.2.2.8.1: dwCRC is the CRC of `cb` bytes of raw data —
+    // the encrypted payload only, NOT the alignment padding. Verified
+    // empirically against backup.pst on 2026-05-04 (5/5 sampled blocks
+    // matched cb-only scope; 0/5 matched cb+padding scope).
     const size_t trailerOff = totalSize - kBlockTrailerSize;
-    const uint32_t dwCRC = crc32(buf.data(), trailerOff);
+    const uint32_t dwCRC = crc32(buf.data(), cbPayload);
 
     writeU16(buf.data(), trailerOff + 0, static_cast<uint16_t>(cbPayload));
     writeU16(buf.data(), trailerOff + 2, computeBlockSig(bid, ib));

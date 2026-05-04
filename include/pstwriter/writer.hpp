@@ -85,4 +85,47 @@ WriteResult writeXBlockPst(const string&  path,
                            size_t         cbPayload,
                            size_t         chunkSize) noexcept;
 
+// ============================================================================
+// M5 Phase D: end-to-end PST with NBT entries (no orphan blocks).
+//
+// Each data block in `blocks` is wrapped in a BBTENTRY. Each node in `nodes`
+// is wrapped in an NBTENTRY pointing to its bidData (and bidSub if non-zero).
+// Both NBT and BBT auto-paginate to single-intermediate level (M5 cap; multi-
+// level is M7+).
+//
+// File layout produced:
+//   0x000..0x233   HEADER (ROOT.brefNbt, ROOT.brefBbt point to roots below)
+//   0x234..0x3FF   zero pad
+//   0x400..0x5FF   AMap
+//   0x600..        data blocks (64-byte alignment)
+//                  BBT leaves + (optional) BBT intermediate
+//                  NBT leaves + (optional) NBT intermediate
+//   ibFileEof
+//
+// Caller is responsible for ensuring:
+//   * Every node's bidData and bidSub matches a block in `blocks` (or is 0).
+//   * NIDs are unique (use M5Allocator to enforce).
+//   * Block BIDs are unique and well-formed (data BIDs for data blocks,
+//     internal BIDs for XBLOCK/SLBLOCK/etc.).
+//
+// Returns failure if NBT or BBT count exceeds the M5 single-intermediate
+// cap (300 nodes / 400 blocks).
+// ============================================================================
+struct M5DataBlockSpec {
+    Bid             bid;
+    vector<uint8_t> encodedBlock; // already buildDataBlock-produced
+    uint16_t        cb;           // pre-encryption payload size
+};
+
+struct M5Node {
+    Nid nid       {};
+    Bid bidData   {};
+    Bid bidSub    {};
+    Nid nidParent {};
+};
+
+WriteResult writeM5Pst(const string&                  path,
+                       const vector<M5DataBlockSpec>& blocks,
+                       const vector<M5Node>&          nodes) noexcept;
+
 } // namespace pstwriter

@@ -25,6 +25,11 @@ add_executable(pstwriter_tests
     test_ndb.cpp
     test_block.cpp
     test_ltp.cpp
+    test_m5_allocator.cpp
+    test_m5_btpage.cpp
+    test_m5_nbt_reader.cpp
+    test_m5_end_to_end.cpp
+    test_messaging.cpp
     # pst_info source compiled into the test binary so the LTP
     # end-to-end test can call runPstInfo() directly. We define
     # PSTWRITER_PST_INFO_NO_MAIN to suppress the binary's main().

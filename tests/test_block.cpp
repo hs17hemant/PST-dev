@@ -127,7 +127,8 @@ bool fileSelfCheck(const vector<uint8_t>& file)
             if (blockIb + totalCb > file.size()) return false;
             const uint8_t* blk = file.data() + blockIb;
             const uint32_t storedCRC = readU32(blk, totalCb - kBlockTrailerSize + 4);
-            if (storedCRC != crc32(blk, totalCb - kBlockTrailerSize)) return false;
+            // [MS-PST] §2.2.2.8.1: dwCRC scope is `cb` bytes only.
+            if (storedCRC != crc32(blk, cb)) return false;
         }
         return true;
     };
@@ -172,9 +173,9 @@ TEST_CASE("Data block: trailer CRC covers encrypted payload, not plaintext",
     REQUIRE(t.bid  == bid.value);
     REQUIRE(t.wSig == computeBlockSig(bid, ib));
 
-    // CRC must hash the encrypted bytes the trailer sits behind.
-    const uint32_t recomputed = crc32(blk.data(),
-                                      blk.size() - kBlockTrailerSize);
+    // CRC must hash the cb bytes of encrypted payload (NOT the alignment
+    // padding) per [MS-PST] §2.2.2.8.1.
+    const uint32_t recomputed = crc32(blk.data(), t.cb);
     REQUIRE(t.dwCRC == recomputed);
 
     // Encrypted payload must differ from plaintext (the regression for the
@@ -206,7 +207,7 @@ TEST_CASE("Empty data block builds, has cb=0 and a valid trailer",
     REQUIRE(t.cb   == 0u);
     REQUIRE(t.bid  == bid.value);
     REQUIRE(t.wSig == computeBlockSig(bid, ib));
-    REQUIRE(t.dwCRC == crc32(blk.data(), blk.size() - kBlockTrailerSize));
+    REQUIRE(t.dwCRC == crc32(blk.data(), t.cb));
 }
 
 TEST_CASE("XBLOCK: header layout and entry packing", "[block][xblock]")
@@ -235,7 +236,7 @@ TEST_CASE("XBLOCK: header layout and entry packing", "[block][xblock]")
     // Body = 8-byte header + 4 * 8-byte BIDs = 40.
     REQUIRE(t.cb  == 40u);
     REQUIRE(t.bid == bid.value);
-    REQUIRE(t.dwCRC == crc32(blk.data(), blk.size() - kBlockTrailerSize));
+    REQUIRE(t.dwCRC == crc32(blk.data(), t.cb));
 }
 
 TEST_CASE("XXBLOCK: cLevel = 2 (vs XBLOCK's cLevel = 1)",
@@ -278,7 +279,7 @@ TEST_CASE("SLBLOCK: btype=0x02, cLevel=0, dwPadding=0",
     const auto t = readBlockTrailer(blk.data(), blk.size());
     REQUIRE(t.cb == 8u + 2u * kSlEntrySize); // 8 + 48 = 56
     REQUIRE(t.bid == bid.value);
-    REQUIRE(t.dwCRC == crc32(blk.data(), blk.size() - kBlockTrailerSize));
+    REQUIRE(t.dwCRC == crc32(blk.data(), t.cb));
 }
 
 TEST_CASE("SIBLOCK: btype=0x02, cLevel=1", "[block][siblock]")
@@ -701,28 +702,50 @@ TEST_CASE("SLBLOCK round-trips [MS-PST] Sec 3.7 sample byte-for-byte",
     // a 24-bit IB.
     REQUIRE(computeBlockSig(Bid{0x1386u}, Ib{0x594D80ull}) == 0x5E5Fu);
 
-    // Round-trip body bytes.  Like §3.5 (BBT leaf), the §3.7 sample's
-    // stored dwCRC=0xD9D45E50 does NOT match a re-computation of
-    // crc32 over the preceding 48 bytes under our PST CRC-32 (which
-    // is verified end-to-end by §3.2 header).  This is the SAME
-    // anomaly pattern: hand-edited illustrative dump, invented CRC.
-    // We compare bytes [0..51] (body + zero pad + cb + wSig) verbatim
-    // and require self-consistent dwCRC — see KNOWN_UNVERIFIED.md.
+    // §3.7 anomaly RESOLVED 2026-05-04: the anomaly was caused by our
+    // own writer computing dwCRC over (cb + alignment-padding) instead
+    // of just `cb` bytes per [MS-PST] §2.2.2.8.1. Once src/block.cpp
+    // was corrected, §3.7's stored dwCRC=0xD9D45E50 matches our
+    // computation exactly. The spec sample was correct all along.
+    //
+    // This test now does FULL byte-for-byte comparison against §3.7's
+    // 64 bytes including dwCRC + bid in the trailer.
     const auto regen = buildSlBlock(&e, 1, Bid{0x1386u}, Ib{0x594D80ull});
     REQUIRE(regen.size() == golden.size());
-    for (size_t i = 0; i < trailerOff + 4; ++i) {
+    for (size_t i = 0; i < golden.size(); ++i) {
         if (regen[i] != golden[i]) {
             INFO("first mismatch at offset 0x" << std::hex << i
                  << ": regen=" << +regen[i] << " golden=" << +golden[i]);
-            FAIL("byte mismatch in §3.7 SLBLOCK round-trip [0..52)");
+            FAIL("byte mismatch in Sec 3.7 SLBLOCK round-trip");
         }
     }
-    // Self-consistent CRC: our trailer's dwCRC equals crc32 over our
-    // own pre-trailer 48 bytes (which match the golden's pre-trailer
-    // bytes byte-for-byte, so this is also a CRC-over-spec-bytes test
-    // — just under our implementation, not against the spec's stored
-    // value).
-    REQUIRE(readU32(regen.data(), trailerOff + 4) ==
-            crc32(regen.data(), trailerOff));
-    REQUIRE(readU64(regen.data(), trailerOff + 8) == 0x1386u);
+    // Verify the dwCRC scope is `cb` bytes (= bodyBytes for SLBLOCK
+    // = 8 header + 24 SLENTRY = 32) and the stored value matches.
+    REQUIRE(storedCRC == crc32(regen.data(), 32u));
 }
+
+// ============================================================================
+// M5 PRE-FLIGHT PLACEHOLDERS (SKIPPED until M5 implementation lands).
+// These define the M5 implementation gates per the same pattern used for
+// the M4 [synthetic_pc_composition] placeholder during M3->M4 transition.
+//
+// When M5 lands:
+//   * remove the SKIP() lines
+//   * uncomment the round-trip assertions
+//   * the test name + tag identifies the exact M5 gate item it covers
+// ============================================================================
+
+// Sample summary (from sec 3.3, transcribed 2026-05-02 in M5 pre-flight):
+//   * 3 BTENTRY records (cEnt=3, cEntMax=0x14, cbEnt=0x18, cLevel=1)
+//   * page IB = 0x8200, page bid = 0x206
+//   * stored wSig = 0x8006, dwCRC = 0x02E8B164 (POSITIVE control: matches)
+//   * ptype = 0x81 (specifically intermediate NBT; format is shared with BBT)
+//
+// UNLOCKED in M5 Phase B -- the byte-for-byte round-trip test now lives
+// in tests/test_m5_btpage.cpp under the same [golden_spec_bt_intermediate]
+// tag. This placeholder is preserved as a comment for traceability.
+
+// Sample shape: minimum end-to-end PST that proves the M5 wiring contract.
+// UNLOCKED in M5 Phase D -- the test now lives in tests/test_m5_end_to_end.cpp
+// under the tag [m5][end_to_end][m5_gate]. This placeholder is preserved as
+// a comment for traceability.
