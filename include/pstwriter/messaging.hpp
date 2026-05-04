@@ -112,4 +112,51 @@ struct MessageStoreSchema {
 PcResult buildMessageStorePc(const MessageStoreSchema& schema,
                              Nid                       firstSubnodeNid);
 
+// ============================================================================
+// FolderPcSchema — input to buildFolderPc(...).
+//
+// Covers §2.7.1's "PC / Schema Props" rows for NORMAL_FOLDER nodes:
+//   * NID_ROOT_FOLDER (0x122)
+//   * <IPM SuBTree>   (0x8022)
+//   * <Search Folder objects>, the Finder (0x8042)
+//   * <Deleted Items>, wastebasket    (0x8062)
+//
+// Per §3.12, all 4 share the same 4-property schema:
+//   0x3001  PidTagDisplayName        PtypString    UTF-16-LE display name
+//   0x3602  PidTagContentCount       PtypInteger32 message count in folder
+//   0x3603  PidTagContentUnreadCount PtypInteger32 unread message count
+//   0x360A  PidTagSubfolders         PtypBoolean   1 iff folder has children
+//
+// Search Folder PC (NID 0x2223, nidType=SEARCH_FOLDER) has a different
+// schema and uses a separate builder (M6.4, not yet implemented).
+// ============================================================================
+struct FolderPcSchema {
+    // PidTagDisplayName UTF-16-LE bytes. May be empty (zero-length).
+    const uint8_t* displayNameUtf16le {nullptr};
+    size_t         displayNameSize    {0};
+
+    // PidTagContentCount — number of messages in this folder.
+    // Always 0 in M6 (messages arrive in M7).
+    uint32_t contentCount {0u};
+
+    // PidTagContentUnreadCount — unread-message subset of contentCount.
+    uint32_t contentUnreadCount {0u};
+
+    // PidTagSubfolders — true iff this folder has child folders.
+    // §3.12 sample: Root Folder = true (3 sub-folders), each sub-folder = ?
+    // (sample doesn't show — we default to false; caller overrides for
+    // multi-level hierarchies).
+    bool hasSubfolders {false};
+};
+
+// Build the folder PC for any NORMAL_FOLDER node. Same builder for Root
+// and sub-folders — only the schema input varies. The NID itself is
+// caller-supplied at NBT-wiring time, not embedded in the PC bytes.
+//
+// `firstSubnodeNid` is required by buildPropertyContext but is unused
+// for this 4-property schema (everything fits inline or in HN). Pass
+// any non-HID NID.
+PcResult buildFolderPc(const FolderPcSchema& schema,
+                       Nid                   firstSubnodeNid);
+
 } // namespace pstwriter

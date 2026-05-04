@@ -205,6 +205,115 @@ TEST_CASE("buildMessageStorePc round-trip matches Sec 3.10 schema",
 }
 
 // ============================================================================
+// M6.2 / M6.3 — buildFolderPc round-trip against §3.12 Root Folder schema.
+//
+// §3.12 publishes the Root Folder PC as a 4-property bag:
+//   PidTagDisplayName        PtypString    (UTF-16-LE)
+//   PidTagContentCount       PtypInteger32 (= 0)
+//   PidTagContentUnreadCount PtypInteger32 (= 0)
+//   PidTagSubfolders         PtypBoolean   (= 1, Root has 3 sub-folders)
+//
+// The same schema covers IPM Subtree, Finder, Deleted Items — only
+// the NID and dynamic data change. NID itself is wired at NBT
+// registration, not embedded in PC bytes.
+// ============================================================================
+TEST_CASE("buildFolderPc round-trip matches Sec 3.12 Root Folder schema",
+          "[m6][folder_pc][folder_pc_round_trip][m6_gate]")
+{
+    // §3.12's Root Folder doesn't show a display-name string in the prose
+    // dump (sample is empty / not printed). Use any UTF-16-LE bytes here
+    // — what matters is the round-trip.
+    const array<uint8_t, 22> rootDisplayName = {{
+        0x52, 0x00, 0x6F, 0x00, 0x6F, 0x00, 0x74, 0x00, // "Root "
+        0x20, 0x00, 0x46, 0x00, 0x6F, 0x00, 0x6C, 0x00, // "Fol"
+        0x64, 0x00, 0x65, 0x00, 0x72, 0x00,             // "der"
+    }};
+
+    FolderPcSchema schema{};
+    schema.displayNameUtf16le = rootDisplayName.data();
+    schema.displayNameSize    = rootDisplayName.size();
+    schema.contentCount       = 0u;
+    schema.contentUnreadCount = 0u;
+    schema.hasSubfolders      = true;  // §3.12: Root has 3 sub-folders
+
+    const Nid firstSubnodeNid{0x00000041u};  // Internal nidType, idx=2
+    const PcResult result = buildFolderPc(schema, firstSubnodeNid);
+    REQUIRE(result.subnodes.empty());
+    REQUIRE_FALSE(result.hnBytes.empty());
+
+    const auto props = readPropertyContext(result.hnBytes.data(),
+                                           result.hnBytes.size());
+    REQUIRE(props.size() == 4u);
+
+    SECTION("PidTagDisplayName (0x3001) — UTF-16-LE round-trip")
+    {
+        const auto* p = findProp(props, 0x3001u);
+        REQUIRE(p != nullptr);
+        REQUIRE(static_cast<uint16_t>(p->propType) == 0x001Fu);
+        REQUIRE(p->storage  == ReadPcProp::Storage::HnAlloc);
+        REQUIRE(p->valueSize == rootDisplayName.size());
+        REQUIRE(std::memcmp(p->valueBytes,
+                            rootDisplayName.data(),
+                            rootDisplayName.size()) == 0);
+    }
+
+    SECTION("PidTagContentCount (0x3602) — inline = 0")
+    {
+        const auto* p = findProp(props, 0x3602u);
+        REQUIRE(p != nullptr);
+        REQUIRE(static_cast<uint16_t>(p->propType) == 0x0003u);
+        REQUIRE(p->storage     == ReadPcProp::Storage::Inline);
+        REQUIRE(p->inlineValue == 0u);
+    }
+
+    SECTION("PidTagContentUnreadCount (0x3603) — inline = 0")
+    {
+        const auto* p = findProp(props, 0x3603u);
+        REQUIRE(p != nullptr);
+        REQUIRE(static_cast<uint16_t>(p->propType) == 0x0003u);
+        REQUIRE(p->storage     == ReadPcProp::Storage::Inline);
+        REQUIRE(p->inlineValue == 0u);
+    }
+
+    SECTION("PidTagSubfolders (0x360A) — Boolean inline = 1")
+    {
+        const auto* p = findProp(props, 0x360Au);
+        REQUIRE(p != nullptr);
+        REQUIRE(static_cast<uint16_t>(p->propType) == 0x000Bu);
+        REQUIRE(p->storage == ReadPcProp::Storage::Inline);
+        REQUIRE((p->inlineValue & 0xFFu) == 0x01u);
+    }
+}
+
+// ============================================================================
+// Empty-folder edge case — sub-folder with no children, 0 content, no display
+// name. Verifies the builder handles defaults gracefully.
+// ============================================================================
+TEST_CASE("buildFolderPc handles minimal/default schema (empty leaf folder)",
+          "[m6][folder_pc][folder_pc_empty]")
+{
+    FolderPcSchema schema{};
+    // All defaults: empty display name, contentCount=0, hasSubfolders=false.
+
+    const PcResult result = buildFolderPc(schema, Nid{0x00000041u});
+    REQUIRE_FALSE(result.hnBytes.empty());
+
+    const auto props = readPropertyContext(result.hnBytes.data(),
+                                           result.hnBytes.size());
+    REQUIRE(props.size() == 4u);
+
+    // PidTagSubfolders should now be 0
+    const auto* sub = findProp(props, 0x360Au);
+    REQUIRE(sub != nullptr);
+    REQUIRE((sub->inlineValue & 0xFFu) == 0x00u);
+
+    // PidTagDisplayName should be present but with valueSize == 0
+    const auto* name = findProp(props, 0x3001u);
+    REQUIRE(name != nullptr);
+    REQUIRE(name->valueSize == 0u);
+}
+
+// ============================================================================
 // M6.1 — EntryID encoder shape verification.
 //
 // Reproduces all 3 §3.10 EntryIDs byte-for-byte from the schema-side

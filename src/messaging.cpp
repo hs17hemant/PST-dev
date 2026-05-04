@@ -126,4 +126,43 @@ PcResult buildMessageStorePc(const MessageStoreSchema& schema,
     return buildPropertyContext(props, 11, firstSubnodeNid);
 }
 
+// ----------------------------------------------------------------------------
+// buildFolderPc — 4-property PC for NORMAL_FOLDER nodes (§3.12 schema).
+//
+// Used for: Root Folder (NID 0x122), IPM SuBTree (0x8022), Finder (0x8042),
+// Deleted Items (0x8062), and any caller-defined sub-folder.
+// ----------------------------------------------------------------------------
+PcResult buildFolderPc(const FolderPcSchema& schema,
+                       Nid                   firstSubnodeNid)
+{
+    // Inline value buffers (LE-packed).
+    array<uint8_t, 4> contentCountBytes{};
+    detail::writeU32(contentCountBytes.data(), 0, schema.contentCount);
+
+    array<uint8_t, 4> contentUnreadBytes{};
+    detail::writeU32(contentUnreadBytes.data(), 0, schema.contentUnreadCount);
+
+    array<uint8_t, 1> subfoldersBytes{
+        static_cast<uint8_t>(schema.hasSubfolders ? 1u : 0u)
+    };
+
+    PcProperty props[4] = {
+        // PidTagDisplayName (HN-stored, variable)
+        { 0x3001u, PropType::Unicode,
+          schema.displayNameUtf16le, schema.displayNameSize,
+          PropStorageHint::Auto },
+        // PidTagContentCount (inline)
+        { 0x3602u, PropType::Int32,
+          contentCountBytes.data(), 4u, PropStorageHint::Auto },
+        // PidTagContentUnreadCount (inline)
+        { 0x3603u, PropType::Int32,
+          contentUnreadBytes.data(), 4u, PropStorageHint::Auto },
+        // PidTagSubfolders (inline, Boolean — 1 byte zero-extended to 4)
+        { 0x360Au, PropType::Boolean,
+          subfoldersBytes.data(), 1u, PropStorageHint::Auto },
+    };
+
+    return buildPropertyContext(props, 4, firstSubnodeNid);
+}
+
 } // namespace pstwriter
