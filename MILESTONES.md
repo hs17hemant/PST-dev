@@ -1345,3 +1345,66 @@ Phase E remains pending. The CRC scope fix landed today substantially de-risks P
 ### Retrospective (one paragraph)
 
 The validation pass discovered a 1.5-year-old CRC scope bug that had been hiding in plain sight, masked by test self-consistency. Three KNOWN_UNVERIFIED entries that had been logged with the hypothesis "the spec must be hand-edited" (§3.5, §3.7 anomalies + §3.6 working as the lone positive control) all flipped from anomaly to verified once the root cause was identified — the spec was right; our writer had been wrong since M3. Empirical validation against a 2.3-MB real Outlook PST resolved 6 entries cleanly, surfaced 1 over-alignment (HNPAGEMAP) as a benign tolerance, and left only 1 untested (empty-PC sentinel, requires a different sample shape). The pattern that pre-registered single-sample assumptions at inference time (per the M3-era discipline) paid off: every entry was already framed as a yes/no test against external evidence, so the resolution took ~2 hours of probe code + spec re-reads rather than a milestone of speculative refactoring.
+
+### CRC-scope bug retrospective (added 2026-05-04, post-fix)
+
+**Affected scope: M2 through M6** produced PSTs with wrong block dwCRC
+values whenever a block's payload size wasn't naturally aligned to
+`64*n - 16`. That covers the great majority of blocks in any non-trivial
+PST. Every PST we shipped before commit `5c4a5c6` would have been
+rejected by Outlook's CRC verification at open time.
+
+**Critical caveat about ALL CHECKS PASSED results before commit `5c4a5c6`**:
+they were self-consistent confirmations of a shared writer/reader bug,
+NOT validation against external ground truth. pst_info computed the
+same wrong scope as the writer (`crc32(blk, totalCb - kBlockTrailerSize)`),
+so writer-produced blocks always self-verified. The bug only surfaced
+when verifying a block produced by an *independent* writer (Outlook's),
+which is what the backup.pst real-Outlook validation finally did.
+
+**Why this matters for M7-M9 design**:
+
+The writer/reader independence contract — the implicit promise that the
+reader provides an independent verification path against the writer —
+**failed**, because both shared the same buggy CRC primitive. The
+contract was structural fiction, not enforced separation.
+
+**Shared primitives are shared risk.** Concrete examples that may surface
+during M7-M9:
+- Any byte-encoding helper called by both writer and reader (e.g., RTF
+  compression, internet-message-headers serialization).
+- Any value-conversion function (Graph time → FILETIME, ASCII → UTF-16-LE,
+  Graph attachment-method enum → PidTagAttachMethod).
+- Any inline-vs-HN-vs-subnode storage decision used by both PC builder
+  and PC reader.
+
+**Pattern to apply during M7-M9**:
+1. When adding any new shared primitive, write at least one test that
+   exercises it via a path *different* from the writer/reader pair —
+   e.g., compare against published spec sample bytes, or against a
+   trace from a third-party reader (libpff, mfcmapi).
+2. Vary test conditions across positive controls. Do not rely on a
+   single sample to prove a class of correctness; § conditions matter.
+3. If a test you control disagrees with another test you control, do
+   not conclude "the spec must be wrong" — investigate your own
+   primitives first.
+4. Treat any "this should work but doesn't, must be hand-edited"
+   hypothesis as a warning sign. Validate the primitive before
+   accepting the hypothesis.
+
+**Concrete remediation list (open items as of M6 closure)**:
+
+| Item | Status | Notes |
+|---|---|---|
+| All M2-M6 internal tests pass under correct CRC scope | ✓ done | 137/137 in commit `5c4a5c6` |
+| pst_info on backup.pst matches all 243 block CRCs | ✓ done | post-fix |
+| pst_info on m6_full_pst.pst still ALL CHECKS PASSED | ✓ done | post-fix |
+| MSVC `/W4 /WX` clean build | pending | Track 2 of pre-M7 cleanup |
+| Phase E real-Outlook validation of m6_full_pst.pst | pending | requires Windows + Outlook |
+| Empty-PC `hidRoot=0` sentinel verification | pending (UNTESTED) | requires fresh-Outlook PST |
+
+The CRC-scope finding elevated the urgency of MSVC `/W4 /WX` cleanup —
+deferred since M3 because "MinGW is sufficient", but MinGW's looser
+warnings missed the same class of issue that hid the CRC bug for 6+
+milestones. Going forward, both MinGW and MSVC must be green as gate
+items for every milestone.

@@ -73,52 +73,78 @@ Each row format:
 | [src/block.cpp](src/block.cpp) | Internal blocks (XBLOCK/XX/SL/SI) are NOT encrypted; only data blocks are encrypted | encrypt internals too | Spec §1.3.1.5 says encryption applies to "data blocks". libpff agrees | scanpst |
 | [tests/test_block.cpp `[golden_spec_bbt_leaf]`](tests/test_block.cpp) | The §3.5 BBT-leaf sample test does NOT compare the trailer's `dwCRC` byte-for-byte | strict byte-for-byte comparison | The spec's published `dwCRC=0xA1F6A02F` does NOT match `crc32(its-own-first-496-bytes)` under our PST CRC-32 (verified by §3.2 header end-to-end). The §3.5 sample also has BREF entries with 64-byte-misaligned IBs (e.g. ib=0x20B) — strongly suggests Microsoft hand-edited the dump for illustration without regenerating the CRC. Our test verifies bytes [0..499] (page body + ptype/ptypeRepeat/wSig), the wSig landmark (0x00D6), the bid (0x246), and self-consistent dwCRC | None — until a real Outlook BBT page lands in `tests/golden/`, this is the gap |
 
-### Spec-sample dwCRC anomalies (§3.5 BBT leaf and §3.7 SLBLOCK)
+### Spec-sample dwCRC anomalies (§3.5 BBT leaf and §3.7 SLBLOCK) — RESOLVED 2026-05-04
 
-**Status: blocked on a real Outlook-produced PST. NOT blocked on us.**
+**Status: RESOLVED. Original hypothesis was WRONG. Root cause was a CRC
+scope bug in our writer/reader, fixed in commit `5c4a5c6`.**
 
-The [MS-PST] published spec samples at:
+[MS-PST] published spec samples at:
 - §3.5 *Sample Leaf BBT Page* — stored dwCRC `0xA1F6A02F`
 - §3.7 *Sample SLBLOCK* — stored dwCRC `0xD9D45E50`
 
-both fail to match a re-computation of crc32 over their own pre-trailer
-bytes under our PST CRC-32 implementation. That same implementation
-**reproduces the §3.2 sample header's dwCRCPartial=0x379AA90E and
-dwCRCFull=0x1FD283D6 exactly**, AND **reproduces the §3.6 XBLOCK's
-stored dwCRC=0x3FEECD51 byte-for-byte** — so our CRC code is correct
-on the spec's own evidence.
+were both correct all along. Our writer was computing `dwCRC = crc32(buf,
+trailerOff)` (where `trailerOff = totalSize - 16` = cb + 64-byte alignment
+padding) instead of `crc32(buf, cb)` per [MS-PST §2.2.2.8.1] verbatim:
+*"dwCRC: 32-bit CRC of the **cb bytes** of raw data"*.
 
-Reasons we believe these two samples are hand-illustrated, not
-Outlook-extracted:
+**Resolution evidence**:
+- After commit `5c4a5c6` fixed [src/block.cpp](src/block.cpp), the §3.7 SLBLOCK byte-diff test was upgraded from "[0..52) + self-consistent CRC under wrong scope" to **full byte-for-byte against §3.7's published 64 bytes including stored dwCRC + bid in trailer**, and it passes.
+- pst_info on backup.pst (real Outlook PST): 50/243 → **243/243** block CRCs verified after fix.
+- §3.6 XBLOCK still passes: it had `cb = totalSize - 16 = 432` (no padding), so both the buggy and correct CRC scopes produce identical output. This coincidence is why §3.6 was a positive control under the wrong scope.
 
-- §3.5 also has BBTENTRY records with impossible IBs (e.g. `ib=0x20B`
-  is not a multiple of 64, but blocks must be 64-byte-aligned per
-  §2.2.2.8).
-- The §3.6 sample sits in the *same spec section* as §3.5/§3.7 and
-  has correct CRC. If a generic CRC bug affected the spec, all three
-  would diverge.
-- §3.5 / §3.7 are smaller, simpler illustrations — exactly the kind
-  the doc author would hand-edit; §3.6 is mechanical (53 sequential
-  BIDs) and easy to leave alone.
+**Why the original hypothesis was wrong**:
 
-**Why this is not blocking pstwriter**: our writer reproduces every
-spec-extractable byte of these structures (body + cb + wSig) and emits
-self-consistent dwCRC values via the same CRC code that has already
-been validated end-to-end by §3.2 and §3.6. Outlook will compute its
-own CRC at read-time over the bytes we wrote, so the only failure
-mode would be a generic CRC bug — which §3.2 + §3.6 already rule out.
+The reasoning chain that "§3.6 XBLOCK CRC matches → therefore our CRC code is correct → therefore §3.5/§3.7 must be hand-edited" had a hidden assumption: that §3.6 exercised every CRC code path. It didn't. §3.6 happened to have no alignment padding, so the buggy scope and correct scope produced bitwise-identical CRCs. The bug was invisible under §3.6's specific test conditions.
 
-**Action when an Outlook PST is available**: extract one real BBT page
-and one real SLBLOCK, byte-diff them against `buildBbtLeaf(...)` /
-`buildSlBlock(...)` output, and confirm stored dwCRCs match
-`crc32(...)`. Once that confirmation lands, this entry can be deleted.
+The "BREF entries with 64-byte-misaligned IBs (e.g. ib=0x20B)" observation in §3.5 was correct evidence of *something*, but we drew the wrong conclusion. It was evidence that §3.5 was a partial dump (BBTENTRY records were edited to fit on a sample page), not evidence that the CRC was hand-edited. The CRC was real.
 
-Tests that lock the §3.x oracles in:
-- `[golden_spec_header]` — §3.2, full byte-for-byte (PASSING)
-- `[golden_spec_nbt_leaf]` — §3.4, parse + CRC + wSig (PASSING)
-- `[golden_spec_bbt_leaf]` — §3.5, body + wSig + self-consistent CRC (PASSING; see anomaly above)
-- `[golden_spec_data_tree]` — §3.6, full byte-for-byte XBLOCK round-trip (PASSING)
-- `[golden_spec_slblock]` — §3.7, body + wSig + self-consistent CRC (PASSING; see anomaly above)
+**Tests that now lock the §3.x oracles in** (all PASSING):
+- `[golden_spec_header]` — §3.2, full byte-for-byte
+- `[golden_spec_nbt_leaf]` — §3.4, parse + CRC + wSig
+- `[golden_spec_bbt_leaf]` — §3.5, body + wSig + self-consistent CRC (NOTE: §3.5 still excludes byte-for-byte trailer comparison because of the misaligned BREF IBs — those WERE genuine spec-edits, separate from the CRC issue)
+- `[golden_spec_data_tree]` — §3.6, full byte-for-byte XBLOCK round-trip
+- `[golden_spec_slblock]` — §3.7, **full byte-for-byte including dwCRC + bid trailer** (upgraded post-fix)
+
+### Methodology lesson (2026-05-04, learned from this resolution)
+
+**A single positive control under one set of conditions does not rule out
+a class of bugs; it rules out a class of bugs under those specific
+conditions.**
+
+§3.6 XBLOCK happened to have `cb = totalSize - 16` with no alignment
+padding, so the buggy CRC scope `crc32(buf, trailerOff)` coincidentally
+produced the same value as the correct scope `crc32(buf, cb)`. §3.5
+BBT-leaf and §3.7 SLBLOCK had non-zero padding and exposed the bug — but
+the wrong hypothesis ("Microsoft hand-edited illustrative samples") hid
+the root cause for **6+ milestones** (M3 through M6) and shipped a
+broken writer past every internal test gate.
+
+**Lesson for future positive-control tests**:
+- Vary test conditions across positive controls. Do not rely on a single
+  spec sample as evidence that a class of behavior is correct.
+- If two methods produce matching output under condition X, but you
+  haven't tested under condition Y, you have NOT proven correctness —
+  you've proven they happen to agree under X.
+- When a test you control (§3.5/§3.7) disagrees with a test you also
+  control (§3.6), the more parsimonious explanation than "the spec is
+  wrong" is "I'm wrong, and the disagreement is the signal".
+- Self-consistency between writer and reader is NOT validation. If both
+  share the same buggy primitive, internal round-trip tests pass while
+  external compatibility fails. **Shared primitives are shared risk**;
+  every cross-validation oracle should ideally use a fully-independent
+  computation path.
+
+**Concrete debt incurred by this lesson**: M2 through M6 produced PSTs
+with wrong block dwCRCs whenever payload size wasn't naturally 64-byte
+aligned. ALL CHECKS PASSED results before commit `5c4a5c6` were
+self-consistent confirmations of a shared bug, not validation against
+external ground truth.
+
+**Application during M7-M9**: When adding new builders, watch for shared
+primitives that might propagate the same wrong assumption to writer and
+reader simultaneously. When in doubt, vary test conditions across
+positive controls. Treat any "this spec sample must be wrong" hypothesis
+as a red flag — verify the writer's own primitives first.
 
 ## M5 audit (2026-05-02, M5 closure)
 
