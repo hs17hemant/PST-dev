@@ -224,4 +224,31 @@ struct HierarchyTcRow {
 TcResult buildFolderHierarchyTc(const HierarchyTcRow* rows,
                                 size_t                rowCount);
 
+// ============================================================================
+// buildFolderContentsTc — emit the §3.12-schema 27-column Contents TC.
+//
+// Used for: NID_CONTENTS_TABLE_TEMPLATE (0x060E) + per-folder contents
+// tables (0x012E, 0x802E, 0x804E, 0x806E from §2.7.1).
+//
+// 27-column schema per [SPEC §3.12], sorted by tag ascending. Per-row
+// endBm = 122 (118 fixed + 4 CEB). Always 0-row in M6 — actual message
+// rows arrive in M7.
+//
+// The function takes no row argument: M6 emits "Columns Only" for every
+// Contents TC, matching §3.12's published "Row Matrix Data Not Present
+// (0 Rows)" state and §2.7.1's "Columns Only" minimal state.
+// ============================================================================
+TcResult buildFolderContentsTc();
+
+// ============================================================================
+// buildFolderFaiContentsTc — emit the §3.12-schema 17-column FAI Contents TC.
+//
+// Used for: NID_ASSOC_CONTENTS_TABLE_TEMPLATE (0x060F) + per-folder FAI
+// tables (0x012F, 0x802F, 0x804F, 0x806F from §2.7.1).
+//
+// 17-column schema per [SPEC §3.12], sorted by tag ascending. Per-row
+// endBm = 68 (65 fixed + 3 CEB). Always 0-row in M6.
+// ============================================================================
+TcResult buildFolderFaiContentsTc();
+
 } // namespace pstwriter

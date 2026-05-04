@@ -271,4 +271,74 @@ TcResult buildFolderHierarchyTc(const HierarchyTcRow* rows, size_t rowCount)
                              tcRows.data(), rowCount);
 }
 
+// ----------------------------------------------------------------------------
+// buildFolderContentsTc — 27-column Contents TC matching §3.12 schema.
+// Always 0-row in M6.
+// ----------------------------------------------------------------------------
+namespace {
+
+constexpr TcColumn kContentsCols[27] = {
+    // tag-sorted ascending
+    { 0x0017u, PropType::Int32,      20, 4,  5 },  // Importance
+    { 0x001Au, PropType::Unicode,    12, 4,  3 },  // MessageClass_W
+    { 0x0036u, PropType::Int32,      60, 4, 15 },  // Sensitivity
+    { 0x0037u, PropType::Unicode,    28, 4,  7 },  // Subject_W
+    { 0x0039u, PropType::SystemTime, 40, 8,  9 },  // ClientSubmitTime
+    { 0x0042u, PropType::Unicode,    24, 4,  6 },  // SentRepresentingName_W
+    { 0x0057u, PropType::Boolean,   116, 1, 13 },  // MessageToMe
+    { 0x0058u, PropType::Boolean,   117, 1, 14 },  // MessageCcMe
+    { 0x0070u, PropType::Unicode,    68, 4, 17 },  // ConversationTopic_W
+    { 0x0071u, PropType::Binary,     72, 4, 18 },  // ConversationIndex
+    { 0x0E03u, PropType::Unicode,    56, 4, 12 },  // DisplayCc_W
+    { 0x0E04u, PropType::Unicode,    52, 4, 11 },  // DisplayTo_W
+    { 0x0E06u, PropType::SystemTime, 32, 8,  8 },  // MessageDeliveryTime
+    { 0x0E07u, PropType::Int32,      16, 4,  4 },  // MessageFlags
+    { 0x0E08u, PropType::Int32,      48, 4, 10 },  // MessageSize
+    { 0x0E17u, PropType::Int32,       8, 4,  2 },  // MessageStatus
+    { 0x0E30u, PropType::Int32,      88, 4, 21 },  // ReplItemId
+    { 0x0E33u, PropType::Int64,      92, 8, 22 },  // ReplChangenum
+    { 0x0E34u, PropType::Binary,    100, 4, 23 },  // ReplVersionhistory
+    { 0x0E38u, PropType::Int32,     112, 4, 26 },  // ReplFlags
+    { 0x0E3Cu, PropType::Binary,    108, 4, 25 },  // ReplCopiedfromVersionhistory
+    { 0x0E3Du, PropType::Binary,    104, 4, 24 },  // ReplCopiedfromItemid
+    { 0x1097u, PropType::Int32,      64, 4, 16 },  // ItemTemporaryFlags
+    { 0x3008u, PropType::SystemTime, 80, 8, 20 },  // LastModificationTime
+    { 0x65C6u, PropType::Int32,      76, 4, 19 },  // SecureSubmitFlags
+    { 0x67F2u, PropType::Int32,       0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,       4, 4,  1 },  // LtpRowVer
+};
+
+constexpr TcColumn kFaiContentsCols[17] = {
+    // tag-sorted ascending
+    { 0x001Au, PropType::Unicode,    12, 4,  3 },  // MessageClass_W
+    { 0x003Au, PropType::Unicode,    60, 4, 16 },  // ReportName_W
+    { 0x0070u, PropType::Unicode,    56, 4, 15 },  // ConversationTopic_W
+    { 0x0E07u, PropType::Int32,      16, 4,  4 },  // MessageFlags
+    { 0x0E17u, PropType::Int32,       8, 4,  2 },  // MessageStatus
+    { 0x3001u, PropType::Unicode,    20, 4,  5 },  // DisplayName_W
+    { 0x67F2u, PropType::Int32,       0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,       4, 4,  1 },  // LtpRowVer
+    { 0x6800u, PropType::Unicode,    44, 4, 11 },  // MapiformMessageclass_W (alias)
+    { 0x6803u, PropType::Boolean,    64, 1, 12 },  // FormMultCategorized (alias)
+    { 0x6805u, PropType::MvInt32,    48, 4, 13 },  // OfflineAddressBookTruncatedProperties
+    { 0x682Fu, PropType::Unicode,    52, 4, 14 },  // ReplItemid (Unicode in FAI per §3.12)
+    { 0x7003u, PropType::Int32,      24, 4,  6 },  // ViewDescriptorFlags
+    { 0x7004u, PropType::Binary,     28, 4,  7 },  // ViewDescriptorLinkTo
+    { 0x7005u, PropType::Binary,     32, 4,  8 },  // ViewDescriptorViewFolder
+    { 0x7006u, PropType::Unicode,    36, 4,  9 },  // ViewDescriptorName_W
+    { 0x7007u, PropType::Int32,      40, 4, 10 },  // ViewDescriptorVersion
+};
+
+} // namespace
+
+TcResult buildFolderContentsTc()
+{
+    return buildTableContext(kContentsCols, 27, nullptr, 0);
+}
+
+TcResult buildFolderFaiContentsTc()
+{
+    return buildTableContext(kFaiContentsCols, 17, nullptr, 0);
+}
+
 } // namespace pstwriter

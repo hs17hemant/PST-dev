@@ -542,6 +542,148 @@ TEST_CASE("buildFolderHierarchyTc handles empty (0-row) case",
 }
 
 // ============================================================================
+// M6.7 — buildFolderContentsTc structural validation against §3.12 schema.
+//
+// Always 0-row in M6 (messages arrive in M7). Verify TCINFO header,
+// 27 TCOLDESCs match §3.12 verbatim, and the empty-table sentinel
+// (hnidRows = 0, RowIndex BTHHEADER.hidRoot = 0) is correctly applied.
+// ============================================================================
+TEST_CASE("buildFolderContentsTc produces a Sec 3.12-shaped 27-col empty TC",
+          "[m6][contents_tc][contents_tc_3_12][m6_gate]")
+{
+    const TcResult result = buildFolderContentsTc();
+    REQUIRE_FALSE(result.hnBytes.empty());
+    const uint8_t* hn = result.hnBytes.data();
+
+    REQUIRE(hn[3] == 0x7Cu);   // bClientSig (TC)
+
+    const uint16_t ibHnpm = detail::readU16(hn, 0);
+    const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
+
+    // TCINFO header
+    REQUIRE(hn[tciOff + 0] == 0x7Cu);    // bType
+    REQUIRE(hn[tciOff + 1] == 0x1Bu);    // cCols = 27 = 0x1B
+    // rgib computed from schema:
+    //   end4b = max(ibData+cbData) over 4/8-byte cols = 116
+    //   end2b = end4b = 116 (no 2-byte cols)
+    //   end1b = end2b + 2 (MessageToMe + MessageCcMe, 1 byte each) = 118
+    //   endBm = end1b + ceil(27/8) = 118 + 4 = 122
+    REQUIRE(detail::readU16(hn, tciOff + 2) == 116u);
+    REQUIRE(detail::readU16(hn, tciOff + 4) == 116u);
+    REQUIRE(detail::readU16(hn, tciOff + 6) == 118u);
+    REQUIRE(detail::readU16(hn, tciOff + 8) == 122u);
+    REQUIRE(detail::readU32(hn, tciOff + 10) == 0x00000020u);  // hidRowIndex
+    REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);           // hnidRows (0 = empty)
+
+    // RowIndex BTHHEADER hidRoot = 0 (empty BTH)
+    const uint16_t bthHdrOff = detail::readU16(hn, ibHnpm + 4 + 0);
+    REQUIRE(hn[bthHdrOff + 1] == 4u);    // cbKey
+    REQUIRE(hn[bthHdrOff + 2] == 4u);    // cbEnt
+    REQUIRE(detail::readU32(hn, bthHdrOff + 4) == 0u);  // hidRoot=0 sentinel
+
+    // Verify 27 TCOLDESCs sorted by tag.
+    struct ExpectedCol { uint32_t tag; uint16_t ibData; uint8_t cbData; uint8_t iBit; };
+    const ExpectedCol expected[27] = {
+        { 0x00170003u,  20, 4,  5 },  // Importance
+        { 0x001A001Fu,  12, 4,  3 },  // MessageClass_W
+        { 0x00360003u,  60, 4, 15 },  // Sensitivity
+        { 0x0037001Fu,  28, 4,  7 },  // Subject_W
+        { 0x00390040u,  40, 8,  9 },  // ClientSubmitTime
+        { 0x0042001Fu,  24, 4,  6 },  // SentRepresentingName_W
+        { 0x0057000Bu, 116, 1, 13 },  // MessageToMe
+        { 0x0058000Bu, 117, 1, 14 },  // MessageCcMe
+        { 0x0070001Fu,  68, 4, 17 },  // ConversationTopic_W
+        { 0x00710102u,  72, 4, 18 },  // ConversationIndex
+        { 0x0E03001Fu,  56, 4, 12 },  // DisplayCc_W
+        { 0x0E04001Fu,  52, 4, 11 },  // DisplayTo_W
+        { 0x0E060040u,  32, 8,  8 },  // MessageDeliveryTime
+        { 0x0E070003u,  16, 4,  4 },  // MessageFlags
+        { 0x0E080003u,  48, 4, 10 },  // MessageSize
+        { 0x0E170003u,   8, 4,  2 },  // MessageStatus
+        { 0x0E300003u,  88, 4, 21 },  // ReplItemId
+        { 0x0E330014u,  92, 8, 22 },  // ReplChangenum
+        { 0x0E340102u, 100, 4, 23 },  // ReplVersionhistory
+        { 0x0E380003u, 112, 4, 26 },  // ReplFlags
+        { 0x0E3C0102u, 108, 4, 25 },  // ReplCopiedfromVersionhistory
+        { 0x0E3D0102u, 104, 4, 24 },  // ReplCopiedfromItemid
+        { 0x10970003u,  64, 4, 16 },  // ItemTemporaryFlags
+        { 0x30080040u,  80, 8, 20 },  // LastModificationTime
+        { 0x65C60003u,  76, 4, 19 },  // SecureSubmitFlags
+        { 0x67F20003u,   0, 4,  0 },  // LtpRowId
+        { 0x67F30003u,   4, 4,  1 },  // LtpRowVer
+    };
+    for (size_t i = 0; i < 27; ++i) {
+        const size_t off = tciOff + 22 + i * 8;
+        INFO("TCOLDESC[" << i << "] expected tag=0x" << std::hex << expected[i].tag);
+        REQUIRE(detail::readU32(hn, off + 0) == expected[i].tag);
+        REQUIRE(detail::readU16(hn, off + 4) == expected[i].ibData);
+        REQUIRE(hn[off + 6]                  == expected[i].cbData);
+        REQUIRE(hn[off + 7]                  == expected[i].iBit);
+    }
+}
+
+// ============================================================================
+// M6.8 — buildFolderFaiContentsTc structural validation.
+// ============================================================================
+TEST_CASE("buildFolderFaiContentsTc produces a Sec 3.12-shaped 17-col empty TC",
+          "[m6][fai_contents_tc][fai_contents_tc_3_12][m6_gate]")
+{
+    const TcResult result = buildFolderFaiContentsTc();
+    REQUIRE_FALSE(result.hnBytes.empty());
+    const uint8_t* hn = result.hnBytes.data();
+
+    REQUIRE(hn[3] == 0x7Cu);
+
+    const uint16_t ibHnpm = detail::readU16(hn, 0);
+    const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
+
+    REQUIRE(hn[tciOff + 0] == 0x7Cu);
+    REQUIRE(hn[tciOff + 1] == 0x11u);    // cCols = 17
+
+    // rgib:
+    //   end4b = max(ibData+cbData) over 4/8-byte cols = 64
+    //   end2b = 64
+    //   end1b = 65 (FormMultCategorized 1 byte at ibData=64)
+    //   endBm = 65 + ceil(17/8) = 65 + 3 = 68
+    REQUIRE(detail::readU16(hn, tciOff + 2) == 64u);
+    REQUIRE(detail::readU16(hn, tciOff + 4) == 64u);
+    REQUIRE(detail::readU16(hn, tciOff + 6) == 65u);
+    REQUIRE(detail::readU16(hn, tciOff + 8) == 68u);
+    REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);  // hnidRows=0
+
+    // Spot-check a few TCOLDESCs (full 17-col table verified by build success
+    // — the schema is already in messaging.cpp; this test pins the wire bytes).
+    struct ExpectedCol { uint32_t tag; uint16_t ibData; uint8_t cbData; uint8_t iBit; };
+    const ExpectedCol expected[17] = {
+        { 0x001A001Fu, 12, 4,  3 },  // MessageClass_W
+        { 0x003A001Fu, 60, 4, 16 },  // ReportName_W
+        { 0x0070001Fu, 56, 4, 15 },  // ConversationTopic_W
+        { 0x0E070003u, 16, 4,  4 },  // MessageFlags
+        { 0x0E170003u,  8, 4,  2 },  // MessageStatus
+        { 0x3001001Fu, 20, 4,  5 },  // DisplayName_W
+        { 0x67F20003u,  0, 4,  0 },  // LtpRowId
+        { 0x67F30003u,  4, 4,  1 },  // LtpRowVer
+        { 0x6800001Fu, 44, 4, 11 },
+        { 0x6803000Bu, 64, 1, 12 },
+        { 0x68051003u, 48, 4, 13 },
+        { 0x682F001Fu, 52, 4, 14 },
+        { 0x70030003u, 24, 4,  6 },
+        { 0x70040102u, 28, 4,  7 },
+        { 0x70050102u, 32, 4,  8 },
+        { 0x7006001Fu, 36, 4,  9 },
+        { 0x70070003u, 40, 4, 10 },
+    };
+    for (size_t i = 0; i < 17; ++i) {
+        const size_t off = tciOff + 22 + i * 8;
+        INFO("FAI TCOLDESC[" << i << "] expected tag=0x" << std::hex << expected[i].tag);
+        REQUIRE(detail::readU32(hn, off + 0) == expected[i].tag);
+        REQUIRE(detail::readU16(hn, off + 4) == expected[i].ibData);
+        REQUIRE(hn[off + 6]                  == expected[i].cbData);
+        REQUIRE(hn[off + 7]                  == expected[i].iBit);
+    }
+}
+
+// ============================================================================
 // M6.1 — EntryID encoder shape verification.
 //
 // Reproduces all 3 §3.10 EntryIDs byte-for-byte from the schema-side
