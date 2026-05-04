@@ -1409,66 +1409,93 @@ warnings missed the same class of issue that hid the CRC bug for 6+
 milestones. Going forward, both MinGW and MSVC must be green as gate
 items for every milestone.
 
-### Track 2 — MSVC `/W4 /WX` cleanup: DEFERRED to M7 Phase D (decided 2026-05-04)
+### Track 2 — MSVC `/W4 /WX` cleanup: DEFERRED to M10 (Production hardening), 2026-05-04
 
-**Decision**: defer MSVC dual-toolchain cleanup to M7 Phase D, with two
-compensating commitments documented below. This continues the M3-era
-deferral pattern, but the rationale and trade-offs are now explicit and
-the deferral is bounded (M7 Phase D = re-attempt, not "indefinite").
+**Decision**: defer MSVC dual-toolchain cleanup to **M10 (Production
+hardening)**.
 
-**Why deferred (this round)**:
-- VS Build Tools 2022 install via `winget` reported success but did not
-  materialize the toolchain (`vcvars64.bat` not at expected path; no VS
-  Installer registration via `vswhere`). Most likely cause: the multi-GB
-  workload install required an interactive elevation that didn't auto-
-  resolve under non-interactive shell context. Per project-wide rule
-  ("if installation requires user action, stop and report — do not
-  attempt workarounds"), the install was halted.
-- Manual install would require 30-45 minutes of attended user time +
-  uncertain warning-fix duration. Defers M7 again.
-- The deliverable pressure (Aspose.Email replacement via M7-M9) is
-  dominant.
+**This is the SIXTH deferral** of MSVC cleanup (M3, M4, M5, M6,
+pre-M7 cleanup pre-attempt, now to M10). The deferral chain has been
+recognized as a recurring pattern. **Future deferrals beyond M10
+require explicit user reauthorization** rather than continuing
+implicitly. M10 = re-attempt is not optional; if M10 arrives and
+MSVC is still not installable, escalate to manual user action rather
+than further defer.
 
-**Why deferring is acceptable here (and was not, in some other M5/M6
-debt items)**:
+**Rationale recorded for this round**:
 
-The CRC-scope bug (commit `5c4a5c6`) was caught by **external ground-
-truth validation** (backup.pst, an Outlook-produced PST), not by any
-toolchain warning. MSVC `/W4 /WX` does not check for that class of
-logic bug. The strongest safety net for this project is real-Outlook
-validation, not internal toolchain strictness.
+- **Time pressure on Aspose.Email replacement deliverable** is the
+  dominant constraint. M7-M9 (mail / contacts / calendar) is the
+  full deliverable scope; another ~hour blocking M7 entry on a
+  bounded-yield cleanup is the wrong trade-off.
+- **MinGW with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion
+  -Werror` provides primary warning coverage**. 137/137 tests pass
+  under that gate. Marginal yield from MSVC is bounded: a few
+  format-string mismatches, finer signedness checks, a few
+  uninitialized-variable patterns. Real but ~5-30 warnings,
+  mechanical.
+- **Validation effort prioritized toward real-Outlook gate work
+  when access becomes available**. The CRC-scope bug
+  (commit `5c4a5c6`) — the canonical example of the kind of bug
+  MSVC strictness exists to catch — was actually caught by EXTERNAL
+  ground-truth validation (backup.pst, real Outlook PST), not by
+  any toolchain warning. Real-Outlook validation is the stronger
+  oracle for this project's failure modes.
+- **VS Build Tools 2022 install via `winget` reported success but
+  did not materialize the toolchain** (`vcvars64.bat` absent,
+  `vswhere` returns empty registration). Most likely cause: the
+  multi-GB workload install required an interactive elevation that
+  didn't auto-resolve under non-interactive shell context. Per
+  project-wide rule ("if installation requires user action, stop
+  and report — do not attempt workarounds"), the install was halted.
 
-The marginal yield of MSVC over MinGW (`-Wall -Wextra -Wpedantic
--Wshadow -Wconversion -Werror`) is bounded: a few additional format-
-string mismatches, finer signedness mismatches, uninitialized-variable
-patterns MinGW happens to miss. Real but probably 5-30 warnings, all
-mechanical.
+**Risk acknowledged**:
 
-**Compensating commitments (documented to make this deferral safe)**:
+- Shipping code that has not been compiled under MSVC. Future
+  engineers using Visual Studio will likely encounter warnings on
+  first build.
+- **Estimated cleanup effort when eventually performed: 0.5 to 1 day.**
+  Drift accumulates with each milestone of additional code (M7-M9
+  add ~3-5x more source); the ratio of cleanup-time-to-codebase-size
+  may grow more than linearly if the warning categories diverge
+  across new code patterns.
+- A class of bugs MSVC catches and MinGW does not (some
+  uninitialized-variable patterns, MSVC-specific narrowing checks)
+  may sit undetected in M7-M9 code until M10 cleanup. These would
+  not be runtime-fatal under MinGW but could be on MSVC.
 
-1. **Per-milestone real-Outlook validation gate**: every M7-M9 milestone
-   produces its own primary PST (m7_full_pst.pst, m8_contacts.pst,
-   m9_calendar.pst, etc.). Each gets the same backup.pst-style
-   structural probe (block CRCs, page CRCs, BBT/NBT walks, HN body
-   inspection) AND an opens-in-Outlook test before closure. This is
-   exactly what caught the CRC scope bug. It is the stronger oracle
-   than MSVC `/W4 /WX` warnings would have been.
+**Compensating commitment**:
 
-2. **MSVC re-attempt at M7 Phase D**: when M7 Phase D arrives (or at
-   the M7→M8 boundary, whichever comes first), retry the install path
-   — manual GUI install if needed — and run the cleanup. Do not let
-   this deferral chain indefinitely. If M7 Phase D arrives and MSVC is
-   still not installable, escalate to manual user action then rather
-   than continuing to defer.
+Each M7-M9 milestone closure runs:
+1. **`pst_info` structural validation** against the milestone's
+   produced PST (m7_full_pst.pst, m8_contacts.pst, m9_calendar.pst,
+   etc.) — block CRCs, page CRCs, BBT/NBT walks, HN body inspection.
+2. **(When Outlook access available) opens-in-Outlook test**
+   against the same PST.
+
+This is the safety net that caught the CRC scope bug. It is not a
+substitute for MSVC strictness on warning-class bugs, but it is
+substantially stronger on logic-class bugs.
+
+**Deferral history (for accountability)**:
+
+| Milestone boundary | Decision | Rationale |
+|---|---|---|
+| End of M3 | Deferred | "fix later, focus on block writer" |
+| End of M4 | Deferred | "M5 priority, fix in M5 toolchain debt action plan" |
+| End of M5 (Phase D) | Deferred | "concentrate MSVC remediation in batch at M5 closure" |
+| End of M6 (Phase D) | Deferred | "M6 deliverable pressure, M7 Phase D will retry" |
+| Pre-M7 cleanup attempt (today) | Attempted, failed silently | winget reported success but toolchain didn't materialize |
+| **Now** | **Deferred to M10** | Aspose deliverable pressure; explicit acknowledgment that the chain has gone six deferrals deep |
 
 **MinGW status (unchanged)**: 137/137 tests pass under
 `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`. That gate
-remains the standing toolchain check until MSVC is added.
+remains the standing toolchain check until MSVC is added at M10.
 
 **Failed install evidence kept for next attempt** (not committed):
 - `.tmp/winget_vsbt.log` — full winget output showing
-  "Successfully installed" despite incomplete materialization
+  "Successfully installed" despite incomplete materialization.
 - `vswhere.exe` was deployed (Installer infrastructure exists), but
-  the BuildTools workload itself was not installed
-- Suggests the manual GUI install will be the next-attempt path
-  rather than another `winget --passive` retry
+  the BuildTools workload itself was not installed.
+- Suggests the manual GUI install at https://visualstudio.microsoft.com/visual-cpp-build-tools/
+  will be the M10 retry path rather than another `winget --passive` attempt.
