@@ -42,6 +42,10 @@ add_library(pstwriter STATIC
     src/graph_convert.cpp
     src/graph_message.cpp
     src/mail.cpp
+    src/graph_contact.cpp
+    src/contact.cpp
+    src/graph_event.cpp
+    src/event.cpp
 )
 
 # Two include paths so internal code can write `#include "crc.hpp"`

@@ -573,6 +573,111 @@ Verified by `[mail_pc_round_trip]` test: input `isRead=true + hasAttachments=tru
 
 `M7Folder::containerClass` defaults to "IPF.Note" (mixed case). `buildMailFolderPc` test confirms emission via PidTag 0x3613001F (PtypString). Outlook tolerance to casing is gate 10.
 
+## M8 — Contacts (Graph Contact → IPM.Contact)
+
+### M8-1 — Contact email storage uses PidTag instead of PidLid named property
+
+**Status: tolerated; Outlook contact-UI verification pending.**
+
+[MS-OXOCNTC] §2.2.1.1 says contact email addresses use named properties: `PidLidEmail1Address`, `PidLidEmail1AddressType`, `PidLidEmail1DisplayName`, with PSETID_Address GUID and dispid 0x8083/0x8084/0x8080 respectively. Named properties require `Name-to-ID Map` (NID 0x0061) population beyond M6's empty-state shape.
+
+M8 ships: emits `PidTagEmailAddress_W` (0x3003001F) — the recipient-form tag — populated with `emailAddresses[0].address`, plus `PidTagAddressType_W` (0x3002001F) = "SMTP".
+
+**Risk**: Outlook's contact UI reads the named-property variant exclusively. The PidTag variant likely shows up in `readPropertyContext` round-trips (verified in `[contact_pc_round_trip]` tests) but may not surface in Outlook's contact card.
+
+**Catches it**: open `m8_contacts.pst` in Outlook; verify the contact's email field is populated. If empty: M10 hardening adds Name-to-ID Map machinery + named-property emission.
+
+### M8-2 — Contact photo attachment
+
+**Status: deferred to M10.**
+
+Graph's contact resource doesn't carry inline photo bytes; the photo is fetched separately via `/contacts/{id}/photo/$value`. M8 doesn't fetch photos.
+
+[MS-OXOCNTC] §2.2.1.5 says photo is `PidLidContactPhoto` (named property) with `PidTagAttachmentContactPhoto` (0x7FFF000B) marker on the attachment row. M7's `buildAttachmentPc` is already generic enough to handle this — M10 hardening wires it.
+
+**Catches it**: not applicable — Outlook simply shows the contact without a photo.
+
+### M8-3 — PidLidFileAs (named property)
+
+**Status: deferred.**
+
+Outlook's "File As" field for contacts is `PidLidFileAs` (PSETID_Common, dispid 0x8005). When absent, Outlook computes a default from `PidTagDisplayName_W` ("Last, First" or "First Last" per user setting).
+
+M8 emits `PidTagDisplayName` and `PidTagSubject` to the same display name. Outlook should populate "File As" from these.
+
+**Catches it**: open M8 PST in Outlook; check if contact's "File As" matches displayName. If not, named-property machinery required (same as M8-1).
+
+### M8-4 — Multi-email contacts
+
+**Status: deferred.**
+
+M8 emits only the first `emailAddresses[0]`. Real contacts can have 2-3 emails (work / personal / other). Outlook expects `PidLidEmail1Address`, `PidLidEmail2Address`, `PidLidEmail3Address`.
+
+**Catches it**: open M8 PST in Outlook; check that secondary emails are missing. M10 hardening (named props) addresses.
+
+## M9 — Calendar (Graph Event → IPM.Appointment)
+
+### M9-1 — Appointment named properties (PidLidAppointmentStartWhole etc.) deferred
+
+**Status: deferred to M10.**
+
+[MS-OXOCAL] §2.2.1 specifies that the canonical storage for appointment properties uses named properties under PSETID_Appointment. The most important ones:
+
+| Named property | GUID set | LID | PropType | Purpose |
+|---|---|---|---|---|
+| PidLidAppointmentStartWhole | PSETID_Appointment | 0x820D | SystemTime | Authoritative event start |
+| PidLidAppointmentEndWhole | PSETID_Appointment | 0x820E | SystemTime | Authoritative event end |
+| PidLidAppointmentDuration | PSETID_Appointment | 0x8213 | Int32 | Duration in minutes |
+| PidLidAppointmentSubType | PSETID_Appointment | 0x8215 | Boolean | true = all-day event |
+| PidLidLocation | PSETID_Appointment | 0x8208 | String | Location string |
+| PidLidIsRecurring | PSETID_Appointment | 0x8223 | Boolean | recurring-master flag |
+| PidLidAppointmentRecur | PSETID_Appointment | 0x8216 | Binary | RecurrencePattern bytes |
+| PidLidGlobalObjectId | PSETID_Meeting | 0x0003 | Binary | Cross-system event ID |
+
+M9 ships: `PidTagStartDate` (0x00600040) and `PidTagEndDate` (0x00610040) — top-level PidTags that [MS-OXPROPS] documents as mirrors of the named-prop variants. Other named props are NOT emitted.
+
+**Risk**: Outlook's calendar view may not surface events without the named-prop variants. If not surfaced, events still exist as PCs in the PST (verifiable via `readPropertyContext`) but won't render in Calendar UI.
+
+**Catches it**: open `m9_calendar.pst` in Outlook; navigate to Calendar view. If events absent, M10 hardening adds Name-to-ID Map machinery + named-property emission.
+
+### M9-2 — Time-zone handling
+
+**Status: tolerated.**
+
+Graph's `dateTimeTimeZone` carries `dateTime` (no offset suffix) + `timeZone` (Windows zone name like "Pacific Standard Time" or "UTC"). M9's `toIso(DateTimeTimeZone)` treats non-UTC zones as UTC, appending 'Z'.
+
+For UTC events the math is correct. For PST/EST/etc. events, the FILETIME offset will be wrong by the zone's offset (3-12 hours).
+
+**Catches it**: open M9 PST in Outlook; verify event times display correctly for non-UTC events. M10 hardening: integrate Windows tz database for proper offset application.
+
+### M9-3 — Recurring-event expansion
+
+**Status: deferred to M10.**
+
+Graph's event resource carries a `recurrence` complex type with `pattern` + `range`. Per [MS-OXOCAL] §2.2.1.44, recurrence is stored in `PidLidAppointmentRecur` (named, PtypBinary) as a structured `RecurrencePattern` byte sequence.
+
+M9 doesn't emit recurrence. `EventType::SeriesMaster` events are written as a single PC with the master's start/end; occurrences are not expanded.
+
+**Catches it**: open M9 PST in Outlook with a recurring event; only the master event will appear (or none if Outlook depends on PidLidIsRecurring). M10 hardening implements `RecurrencePattern` encoding + occurrence expansion.
+
+### M9-4 — Attendees → recipient TC mapping
+
+**Status: deferred to M10.**
+
+Graph event attendees parse correctly into `GraphEvent::attendees`. Per [MS-OXOCAL] §2.2.4, meeting attendees are stored in a recipient TC (subnode of the message PC, NID `NID_RECIPIENT_TABLE = 0x692`) — same shape as M7's mail recipient TC.
+
+M9 doesn't emit a recipient TC for events. Reuse of M7's `buildRecipientTc` is straightforward; M10 wires it (just convert `Attendee` to `Recipient` with the kind-mapping: required→To, optional→Cc, resource→Bcc).
+
+**Catches it**: M9 PST shows events but no attendees in Outlook. M10 hardening adds recipient TC subnode per event.
+
+### M9-5 — Online meeting URL / provider (Teams, Zoom)
+
+**Status: deferred to M10.**
+
+Graph's `onlineMeeting.joinUrl` + `onlineMeetingProvider` parse correctly. Outlook stores these via `PidLidConferencingCheckInUrl` + `PidLidOnlineMeetingType` (named). M9 parses but doesn't emit.
+
+**Catches it**: M9 PST events lack the "Join Teams meeting" button. M10 hardening adds named-prop emission.
+
 ## How to use this file
 
 When validation against real Outlook becomes possible:
