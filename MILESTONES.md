@@ -17,7 +17,7 @@ right", not "the test suite passes".
 | M6 | Messaging core — 27 §2.7.1 mandatory nodes (message store, name-to-id map, root IPM folder, wastebasket, finder, templates, hierarchy/contents/FAI tables) | • All 27 mandatory nodes per §2.7.1 produced + parented correctly.<br>• `m6_full_pst.pst` passes `pst_info` ALL CHECKS PASSED.<br>• CRC-scope retrospective fixed (commit `5c4a5c6`); §3.7 SLBLOCK byte-for-byte includes dwCRC.<br>• 8 KNOWN_UNVERIFIED entries from real-Outlook validation pass against backup.pst resolved. | ✅ green |
 | M7 | Mail content — Graph Message JSON → IPM.Note PSTs | • Graph JSON parser + 32+ field extraction.<br>• `buildMailPc(GraphMessage)` PC; recipient TC; HTML body; file + item attachments; multi-recipient; internet headers; folder hierarchy with PidTagContainerClass.<br>• `writeM7Pst` end-to-end with SLBLOCK assembly for message subnodes.<br>• `m7_full_pst.pst` (17 KB) passes `pst_info` ALL CHECKS PASSED. | ✅ green (Outlook open pending) |
 | M8 | Contacts — Graph Contact JSON → IPM.Contact PSTs | • Graph contact parser; `buildContactPc` with ~30 top-level PidTags (name parts, company, phones, addresses, birthday).<br>• `writeM8Pst` end-to-end; "IPF.Contact" folder ContainerClass.<br>• `m8_contacts.pst` (14 KB) passes `pst_info` ALL CHECKS PASSED. | ✅ green (Outlook open pending) |
-| M9 | Calendar — Graph Event JSON → IPM.Appointment PSTs | TBD. Mirrors M8 structure: parser + PC builder + end-to-end writer; "IPF.Appointment" folder ContainerClass; recurring-event expansion as a known limitation. | ⏳ pending |
+| M9 | Calendar — Graph Event JSON → IPM.Appointment PSTs | • Graph event parser (40+ fields: dateTimeTimeZone, Location, Attendee, recurrence-marker enums).<br>• `buildEventPc` with PidTags for MessageClass, Subject, Body (text + HTML), times (StartDate 0x0060 / EndDate 0x0061), Importance, Sensitivity, organizer-as-sender mirrors.<br>• `writeM9Pst` end-to-end; "IPF.Appointment" folder ContainerClass.<br>• `m9_calendar.pst` (14.8 KB) passes `pst_info` ALL CHECKS PASSED.<br>• Named properties (PidLidAppointmentStartWhole, recurrence, attendees) deferred to M10 per KNOWN_UNVERIFIED M9-1..M9-5. | ✅ green (Outlook open pending) |
 | M10 | Production hardening + release | MSVC `/W4 /WX` clean (sixth-deferral honoring required); fuzz `pst_info` against malformed inputs; named-property infrastructure (Name-to-ID Map population) for contact emails / file-as / etc.; multi-block HN; refactor 27-node baseline into shared helper across M6/M7/M8/M9. | ⏳ pending |
 
 ## Why the M4 gate is shaped this way
@@ -2123,3 +2123,113 @@ M8 phasing complete. Like M7, the real-Outlook open gate (item 6)
 remains manual. `m8_contacts.pst` (14 KB, 3 contacts in 2 folders)
 passes pst_info; Outlook open is the verification step the user holds
 the environment for.
+
+---
+
+## M9 — Calendar (Graph Event JSON → IPM.Appointment PST)
+
+### Scope
+
+Per the project-wide context update at M7 pre-flight: M9 = calendar.
+Graph `event` resource → Outlook-compatible PST containing
+`IPM.Appointment` PCs in `IPF.Appointment` folders.
+
+This milestone has the smallest delta of M7-M9 because the
+infrastructure (parser core, builder pattern, end-to-end writer
+shape) is fully reusable from M7/M8. The novelty is the
+calendar-specific PidTag set — and the deliberate non-implementation
+of named-property storage which is M10 hardening.
+
+### Phasing (3 phases — same shape as M8)
+
+| Phase | Scope delivered | Tests |
+|---|---|---|
+| **A** | `GraphEvent` struct (40+ fields including `dateTimeTimeZone`, `Location`, `Attendee`, recurrence-marker enums) + JSON parser (uses shared `internal_json.hpp`). | `test_m9_event.cpp` Phase A (8) |
+| **B** | `buildEventPc(GraphEvent, ctx)` IPM.Appointment PC. Top-level PidTags: MessageClass, Subject, Body (+ BodyHtml), Importance, Sensitivity, CreationTime, LastModificationTime, StartDate (0x0060), EndDate (0x0061), MessageFlags, HasAttachments, organizer-as-sender (0x0C1A/0x0C1F + sent-representing mirrors). | `test_m9_event.cpp` Phase B (7) |
+| **C** | `writeM9Pst(M9PstConfig)` end-to-end. 27 §2.7.1 mandatory nodes + per-`M9CalendarFolder`: folder PC (containerClass = "IPF.Appointment") + 3 sibling tables. Per event: a single PC node parented to its folder. | `test_m9_event.cpp` Phase C (3) |
+
+### Test counts
+
+```
+Pre-M9:    213 cases | 211 passed | 2 skipped | 5540 assertions
+Post-M9:   231 cases | 229 passed | 2 skipped | 5603 assertions
+Δ:         +18 cases | +18 passed | 0 skip    | +63 assertions
+```
+
+### Exit gate
+
+| Item | Description | Status | Evidence |
+|---|---|---|---|
+| 1 | Graph event JSON parsing | ✅ MET | 8 cases including dateTimeTimeZone, locations, organizer/attendees, flags, showAs/type enums |
+| 2 | Event PC round-trip | ✅ MET | 7 `[event_pc_round_trip]` cases verify PidTags + decoded values |
+| 3 | Calendar folder with IPF.Appointment ContainerClass | ✅ MET | `writeM9Pst` reuses `buildMailFolderPc` with `containerClass = "IPF.Appointment"` |
+| 4 | Multiple events in multiple folders | ✅ MET | `[m9_pst_info]` test creates 2 folders with 3 events; pst_info ALL CHECKS PASSED |
+| 5 | pst_info ALL CHECKS PASSED on M9 PST | ✅ MET | `m9_calendar.pst` (14.8 KB, 12 PC + 22 TC) passes pst_info |
+| 6 | Opens cleanly in classic Outlook | ⏭️ DEFERRED | Manual gate per pre-M7 deferral commitment. |
+
+### KNOWN_UNVERIFIED M9 candidates
+
+| ID | Topic | Status |
+|---|---|---|
+| **M9-1** | Appointment named properties (PidLidAppointmentStartWhole, PidLidLocation, PidLidIsRecurring, etc.) | DEFERRED to M10 — `IPM.Appointment` PCs lack canonical named-property storage. M9 emits PidTagStartDate (0x0060) / PidTagEndDate (0x0061) per [MS-OXPROPS] mirror conventions. Outlook may or may not surface events in Calendar UI; gate 6 verifies. |
+| **M9-2** | Time-zone handling | TOLERATED — Graph's `dateTimeTimeZone` carries `timeZone` as Windows zone names. M9 treats non-UTC times as UTC for FILETIME conversion. M10 hardening: integrate Windows tz database for accurate offset application. |
+| **M9-3** | Recurring-event expansion | DEFERRED to M10 — `EventType::SeriesMaster` events parse correctly but only the master record is written; occurrences are not expanded. PidLidAppointmentRecur (named) requires Name-to-ID Map machinery. |
+| **M9-4** | Attendees → recipient TC mapping | DEFERRED to M10 — Graph attendees are parsed; M9 doesn't emit a recipient TC for events (would require subnode tree like M7 messages). M10 reuses M7's `buildRecipientTc`. |
+| **M9-5** | Online meeting URL / provider (Teams/Zoom) | DEFERRED to M10 — Parsed (`onlineMeetingUrl`, `onlineMeetingProvider`) but not stored. Requires PidLidOnlineMeetingType + PidLidConferencingCheckInUrl (named). |
+
+### Files added / modified
+
+**New library files:**
+- `include/pstwriter/graph_event.hpp` + `src/graph_event.cpp` — `GraphEvent` + parser
+- `include/pstwriter/event.hpp` + `src/event.cpp` — `buildEventPc` + `writeM9Pst`
+
+**New test files:**
+- `tests/test_m9_event.cpp` — 18 cases across 3 phases
+
+**Modified:**
+- `CMakeLists.txt` — registers M9 sources
+- `tests/CMakeLists.txt` — registers M9 tests
+
+### Reuse from M7/M8
+
+Per the M7 Decision 6 design intent, M9 reuses:
+
+| Building block | M9 use |
+|---|---|
+| `internal_json.hpp` (extracted at M8) | Same JSON parser; zero duplication for M9 |
+| `graph_convert::utf8ToUtf16le / isoToFiletimeTicks / makeOneOffEntryId / deriveSearchKey` | All used unchanged |
+| `MailPcBuildContext / MailPcResult / MailPcSubnode` | M9 reuses the same builder context shape |
+| `buildMailFolderPc(M7FolderSchema, ...)` | M9 passes `containerClass = "IPF.Appointment"` |
+| `M5Allocator`, 27 `§2.7.1` mandatory nodes | Same pattern (duplicated body — M10 refactor) |
+
+### Risks — outcome
+
+| Risk | Outcome |
+|---|---|
+| Outlook Calendar UI doesn't show events without named props | KNOWN; M9-1 documented; gate 6 verifies |
+| Time-zone misinterpretation for non-UTC events | TOLERATED; M9-2 documented |
+| 27-node baseline now triplicated (mail.cpp / contact.cpp / event.cpp) | Acknowledged. M10 refactor item; ~600 lines of duplication |
+
+### M7-M9 milestone trio — combined deliverable
+
+Per the project-wide scope, M7-M9 together comprise the
+Aspose.Email replacement deliverable:
+
+| Output | M7 | M8 | M9 |
+|---|---|---|---|
+| Generated PST | `m7_full_pst.pst` | `m8_contacts.pst` | `m9_calendar.pst` |
+| Size | 17 KB | 14 KB | 14.8 KB |
+| Container class | `IPF.Note` | `IPF.Contact` | `IPF.Appointment` |
+| Items per PST in test corpus | 2 messages | 3 contacts | 3 events |
+| pst_info status | ALL CHECKS PASSED | ALL CHECKS PASSED | ALL CHECKS PASSED |
+| Outlook open gate | Manual (pending) | Manual (pending) | Manual (pending) |
+
+### M9 closure gate
+
+M9 phasing complete. Like M7 and M8, the real-Outlook open gate
+remains the manual verification step the user holds the environment
+for. `m9_calendar.pst` (14.8 KB, 3 events including HTML body and
+all-day event in 2 folders) passes pst_info ALL CHECKS PASSED.
+
+The Aspose.Email replacement deliverable scope (M7+M8+M9) is now
+implementation-complete pending the three Outlook open gates.
