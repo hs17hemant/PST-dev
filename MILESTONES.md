@@ -1273,3 +1273,75 @@ Same items as M5 pre-flight:
 - MSVC `/W4 /WX` clean build still pending (M5 Phase D ran but did not validate MSVC). M6 Phase D is the new natural moment, OR before M6 Phase B starts (preferred — catches signed/unsigned issues in new code at write time, not at end-of-milestone).
 - MinGW upgrade (g++ 6.3 → modern) deferred to M7 (Hardening).
 
+
+
+---
+
+## M6 closure — Real-Outlook validation pass (backup.pst, 2026-05-04)
+
+**Context**: a real Outlook-produced PST (`backup.pst`, 2.3 MB Unicode wVer=23, 243 BBT entries, 1 intermediate BBT page) was used as ground truth to resolve the 8 KNOWN_UNVERIFIED entries accumulated since M3. **NOTE**: this is parallel to but does NOT satisfy the M6 Phase E gate ("real Outlook opens m6_full_pst.pst"). Phase E remains pending until a Windows + Outlook environment is available.
+
+### Step 1 — pst_info walkability
+
+Header: dwMagic=`!BDN`, wVer=23 (Unicode), wMagicClient=`SM`, both header CRCs match.
+
+Initial result: **`[FAIL]` — 50/243 BBT block CRCs verified, 193 mismatches.** This was a STOP signal: our reader rejected what Outlook produces. Investigation followed before resolving any KNOWN_UNVERIFIED entry.
+
+### Step 1b — root-cause: real CRC scope bug
+
+[src/block.cpp:103](src/block.cpp#L103) computed `dwCRC = crc32(buf, trailerOff)` (= cb + alignment-padding). [MS-PST] §2.2.2.8.1 verbatim: *"dwCRC: 32-bit CRC of the **cb bytes** of raw data"*. Scope must be `crc32(buf, cb)` — padding excluded.
+
+Empirical confirmation via 5-block sample from backup.pst: 5/5 blocks match `cb`-only scope; 0/5 match `cb+padding` scope.
+
+**Why our internal tests didn't catch it**:
+- `[golden_spec_data_tree]` §3.6 XBLOCK has cb=432 = totalSize-16 (no padding). Both scopes coincidentally produce identical CRCs.
+- All other internal tests use *self-consistent* CRCs (writer + reader use same buggy scope). Self-consistency masks the bug.
+- §3.7 SLBLOCK / §3.5 BBT-leaf were the canaries — both flagged as KNOWN_UNVERIFIED with hypothesis "spec sample hand-edited". The real explanation: spec was correct; our writer was wrong.
+
+**Fix applied** to [src/block.cpp](src/block.cpp), [tools/pst_info.cpp](tools/pst_info.cpp), and 6 test assertions. Diff is 1 line per call site (`trailerOff` → `cb` / `bodyBytes` / `cbPayload` / `t.cb`).
+
+### Step 1c — post-fix re-check
+
+- All 137 internal tests pass.
+- §3.7 SLBLOCK byte-for-byte test now does FULL block (incl. dwCRC + bid in trailer) and passes.
+- §3.6 XBLOCK byte-for-byte still passes (no behavior change for naturally-aligned blocks).
+- M6 end-to-end (writeM6Pst) test still passes; pst_info on m6_full_pst.pst still ALL CHECKS PASSED.
+- pst_info on backup.pst: BBT walked **243 entries, 243 block CRCs verified, 0 mismatches**. Remaining failures (14) are reader-side limitations (multi-block HN, hidIndex==0), not writer or CRC issues.
+
+### Step 2 — Eight-entry resolution table
+
+| Entry | Status | Evidence |
+|---|---|---|
+| §3.5 BBT-leaf dwCRC anomaly  | **VERIFIED** | 14/14 BBT leaves CRC-match after CRC fix. Anomaly was OUR bug. |
+| §3.7 SLBLOCK dwCRC anomaly   | **VERIFIED** | Same root cause as §3.5. Full byte-for-byte against §3.7 now passes. |
+| HNPAGEMAP DWORD-alignment    | **TOLERATED** | 48/48 sampled HNs are WORD-aligned; only 13/48 happen to be DWORD-aligned. Outlook uses WORD; our writer over-aligns to DWORD. Both produce structurally valid HNs. M4 reader tolerates real Outlook output. Optimization opportunity for M7+. |
+| Row-major TC varlen ordering | **VERIFIED** | 2/2 multi-row TCs with varlen cols are strictly row-major. |
+| Subnode NID stride +0x20     | **VERIFIED** | 12 multi-entry SLBLOCKs sampled; 90/90 within-nidType strides are +0x20. |
+| Empty-PC hidRoot=0 sentinel  | **UNTESTED** | 0 empty PCs in 21 single-block PCs scanned. Real PSTs rarely contain truly-empty PCs. Would need a freshly-created PST with no activity. |
+| PtypBoolean inline encoding  | **VERIFIED** | 44/44 zero-extended (upper 3 bytes = 0). Low byte: 32 false, 12 true. |
+| M5 intermediate-BBT format   | **VERIFIED** | 1 intermediate BBT page (ptype=0x80, cLevel=1) in backup.pst. CRC matches under same scope as intermediate NBT. Format-shared claim from §3.3 holds. |
+
+**Disagree count: 0.** No bug-fix work needed beyond the already-applied CRC scope fix.
+
+**Untested count: 1** (empty-PC sentinel). To resolve: acquire a freshly-created Outlook PST (Outlook → File → New → Outlook Data File) with no folders or activity beyond the §2.7.1 minimum.
+
+### Step 3 — KNOWN_UNVERIFIED.md updated
+
+See [KNOWN_UNVERIFIED.md](KNOWN_UNVERIFIED.md) "Real-Outlook validation pass (backup.pst, 2026-05-04)" section for per-entry evidence.
+
+### M6 Phase E status
+
+This pass does NOT satisfy M6 Phase E. Phase E specifically requires:
+- Open `m6_full_pst.pst` in classic Outlook on Windows
+- Outlook accepts it without "detected a problem with this Outlook Data File" or scanpst warnings
+- The 8 best-guess M6.5–M6.11 schemas (Search Folder PC, NameToIdMap empty state, Recipient/Attachment/SearchContents templates, bare-node payload, IPM Subtree Hierarchy 2-row vs 0-row) all surface real-Outlook tolerance / rejection
+
+Phase E remains pending. The CRC scope fix landed today substantially de-risks Phase E (Outlook would have rejected every M6 PST we produced before today due to wrong block CRCs).
+
+### MSVC `/W4 /WX` cleanup status
+
+**Still pending.** Has not been addressed during M5 Phase D, M6 Phase B, M6 Phase D, or this validation pass. M5 closure deferred it; M6 Phase A reaffirmed the deferral. Outstanding for M7 (Hardening) at the latest.
+
+### Retrospective (one paragraph)
+
+The validation pass discovered a 1.5-year-old CRC scope bug that had been hiding in plain sight, masked by test self-consistency. Three KNOWN_UNVERIFIED entries that had been logged with the hypothesis "the spec must be hand-edited" (§3.5, §3.7 anomalies + §3.6 working as the lone positive control) all flipped from anomaly to verified once the root cause was identified — the spec was right; our writer had been wrong since M3. Empirical validation against a 2.3-MB real Outlook PST resolved 6 entries cleanly, surfaced 1 over-alignment (HNPAGEMAP) as a benign tolerance, and left only 1 untested (empty-PC sentinel, requires a different sample shape). The pattern that pre-registered single-sample assumptions at inference time (per the M3-era discipline) paid off: every entry was already framed as a yes/no test against external evidence, so the resolution took ~2 hours of probe code + spec re-reads rather than a milestone of speculative refactoring.

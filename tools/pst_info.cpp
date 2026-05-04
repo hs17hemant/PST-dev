@@ -563,8 +563,11 @@ int runPstInfo(const string& path)
                 const uint8_t* blk = file.data() + blockIb;
                 const uint32_t storedCRC =
                     readU32(blk, totalCb - kBlockTrailerSize + 4);
+                // [MS-PST] §2.2.2.8.1: dwCRC scope is `cb` bytes only,
+                // NOT including 64-byte alignment padding. (Empirically
+                // verified against backup.pst on 2026-05-04.)
                 const uint32_t recomputedCRC =
-                    crc32(blk, totalCb - kBlockTrailerSize);
+                    crc32(blk, cb);
                 if (storedCRC == recomputedCRC) {
                     ++verifiedBlockCRCs;
                 } else {

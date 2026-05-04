@@ -5,6 +5,39 @@ would resolve**. When `tests/golden/empty.pst` (or any equivalent
 ground-truth file) is finally produced by Outlook, this is the diff list
 to check first.
 
+## Real-Outlook validation pass (backup.pst, 2026-05-04)
+
+Resolved against a real Outlook-produced PST (2.3 MB Unicode, wVer=23,
+243 BBT entries, 1 intermediate BBT page). 6 of 8 entries Verified, 1
+Tolerated, 1 Untested, 0 Disagree.
+
+| Entry | Status | Evidence summary |
+|---|---|---|
+| §3.5 BBT-leaf dwCRC anomaly  | **VERIFIED** | 14/14 BBT leaves CRC-match after the M3-era CRC scope bug was fixed (commit pending). Anomaly was OUR writer using `crc32(blk, trailerOff)` instead of `crc32(blk, cb)` per [SPEC §2.2.2.8.1]. §3.5 sample was correct all along. |
+| §3.7 SLBLOCK dwCRC anomaly   | **VERIFIED** | Same root cause as §3.5. After fix, `[golden_spec_slblock]` does full byte-for-byte (incl. dwCRC) and passes. §3.7 sample was correct all along. |
+| HNPAGEMAP DWORD-alignment    | **TOLERATED** | Sample of 48 single-block HNs in backup.pst: ibHnpm WORD-aligned in 48/48, DWORD-aligned in only 13/48. Real Outlook uses WORD (2-byte) alignment, NOT DWORD. Our writer over-aligns to DWORD — produces structurally valid HNs (DWORD-aligned ⇒ also WORD-aligned), just with 1-3 bytes of extra padding per HN. M4 reader accepts WORD-aligned ibHnpm without issue (no alignment-related failures in pst_info backup.pst walk). Optimization opportunity for M7+. |
+| Row-major TC varlen ordering | **VERIFIED** | 2/2 multi-row TCs with variable-size columns in backup.pst lay out HN allocations in strict row-major order (all of row N's HIDs > all of row N-1's HIDs). |
+| Subnode NID stride +0x20     | **VERIFIED** | 12 multi-entry SLBLOCKs sampled. Within-nidType stride: +0x20 in 90/90 cases. Cross-nidType strides (~0x7000-0x8500, 11 cases) are not "strides" in the M4 sense — they're nidType boundary changes where the low 5 bits flip. Inside any single nidType counter, +0x20 (= idx +=1) is the canonical stride. |
+| Empty-PC hidRoot=0 sentinel  | **UNTESTED** | 0 empty PCs found in 21 single-block PCs scanned. Real-Outlook PSTs rarely have totally-empty PCs (every PC carries at least DisplayName + a few mandatory props). Would need a freshly-created Outlook PST with no message activity to surface this case. Reader-side compatibility verified: M4 `readPropertyContext` correctly returns `[]` for hidIndex==0 inputs (synthetic round-trip). |
+| PtypBoolean inline encoding  | **VERIFIED** | 44/44 PtypBoolean properties zero-extended (upper 3 bytes = 0). Low byte distribution: 32 false, 12 true. Matches our M4 writer's output exactly. |
+| M5 intermediate-BBT format   | **VERIFIED** | backup.pst has exactly 1 intermediate BBT page (ptype=0x80, cLevel=1). Page CRC matches under same scope as intermediate NBT. The "format shared with NBT-intermediate" claim from §3.3 holds for real Outlook PSTs. |
+
+**No Disagree resolutions.** All 6 Verified entries can be promoted to
+"locked" status. The 1 Tolerated and 1 Untested entries remain open,
+both with documented next steps.
+
+### Significant finding from this pass
+
+A **real CRC-scope bug** was discovered before the entry-resolution pass began. [src/block.cpp](src/block.cpp) computed `dwCRC = crc32(buf, trailerOff)` (over payload + alignment-padding); [SPEC §2.2.2.8.1] says scope is `cb` bytes only. All M2/M3/M5/M6 PSTs we produced had wrong block dwCRC values for any payload not naturally 64-byte-aligned. Internal byte-diff oracles (§3.6) didn't catch it because §3.6 happens to have cb == trailerOff (no padding). Fix applied to [src/block.cpp](src/block.cpp), [tools/pst_info.cpp](tools/pst_info.cpp), and 6 test assertions.
+
+After fix:
+- pst_info on backup.pst: 50/243 → **243/243** block CRCs verified
+- `[golden_spec_slblock]` flipped from "self-consistent CRC under wrong scope" to **full byte-for-byte against §3.7 including dwCRC**
+- All 137 internal tests pass
+- M6 end-to-end (writeM6Pst) still produces structurally-valid PSTs
+
+
+
 Each row format:
 - **Where**: file:line where the guess lives.
 - **What we wrote**: the chosen value or behaviour.
