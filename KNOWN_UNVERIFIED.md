@@ -468,6 +468,111 @@ M6 emits a 4-byte zero payload (smallest legal data block payload, DWORD-aligned
 
 **Catches it**: Outlook open / scanpst on an M6 PST. If `[m6][hierarchy_tc_3_12]` byte-equality against a real-Outlook hierarchy TC fails specifically at the TCOLDESC for 0x3613, swap propType to PtypBinary in the template and keep PtypString in per-folder TCs (one writer with a knob).
 
+## M7 — Mail content (Graph Message → IPM.Note)
+
+The 10 candidates pre-registered in M7 pre-flight (MILESTONES.md "M7
+KNOWN_UNVERIFIED candidates"). Status post-Phase-E:
+
+### M7-1 — HTML body codepage
+
+**Status: pre-registered; awaiting real-Outlook gate (gate item 10).**
+
+[SPEC §3.13] HTML dump (1638 bytes) starts with raw ASCII `<html xmlns:v=...>` — appears UTF-8, not UTF-16-LE. PidTagInternetCodepage = 20127 (US-ASCII) on that sample.
+
+M7 ships: `buildMailPc` emits raw UTF-8 bytes for `PidTagBodyHtml` (0x10130102, PtypBinary), and emits `PidTagBody_W` (0x1000001F, PtypString UTF-16-LE) as a fallback derived from `bodyPreview`.
+
+**Catches it**: Outlook open of `m7_full_pst.pst` produced by `[m7][phase_e]` tests. If body renders as garbage, switch HTML encoding (UTF-16-LE bytes) and possibly emit `PidTagInternetCodepage` (0x3FDE0003) explicitly.
+
+### M7-2 — conversationId vs conversationIndex
+
+**Status: pre-registered; awaiting real-Outlook conversation-grouping verification.**
+
+Graph emits both `conversationId` (string) and `conversationIndex` (binary). [SPEC §3.13] sample confirms `PidTagConversationIndex` is 22 structured bytes (5-byte header + 16-byte FILETIME + GUID prefix).
+
+M7 ships: emits `PidTagConversationIndex` (0x00710102, PtypBinary) from Graph's `conversationIndex` raw bytes. `PidTagConversationId` (0x30130102) NOT emitted — Graph's `conversationId` is a string-form opaque identifier.
+
+**Catches it**: Outlook conversation grouping on the M7 PST. If grouping breaks, derive `PidTagConversationId` from `PidTagConversationIndex` per [MS-OXCMSG] or emit Graph's `conversationId` directly as bytes.
+
+### M7-3 — OneOff EntryID byte format
+
+**Status: pre-registered; awaiting real-Outlook gate.**
+
+[MS-OXCDATA] §2.2.5.1 OneOff EntryID layout. M7 implementation:
+
+```
+bytes  0.. 3   rgbFlags    = 0x00000000
+bytes  4..19   ProviderUID = 81 2B 1F A4  BE A3 10 19  9D 6E 00 DD  01 0F 54 02
+bytes 20..21   Version     = 0x0000
+bytes 22..23   Flags       = 0x9001
+                              bit 0 (0x0001) MAPI_ONE_OFF_NO_RICH_INFO
+                              bit 12 (0x1000) reserved (set per backup.pst pattern)
+                              bit 15 (0x8000) MAPI_ONE_OFF_UNICODE
+bytes 24..    DisplayName  (UTF-16-LE + null terminator)
+bytes ...     AddressType  = "SMTP" (UTF-16-LE + null)
+bytes ...     EmailAddress (UTF-16-LE + null)
+```
+
+**Catches it**: Outlook open. If sender / recipient EntryIDs are rejected, compare against a backup.pst extraction structurally (don't print recipient names — only structural bytes).
+
+### M7-4 — itemAttachment encoding
+
+**Status: pre-registered; awaiting real-Outlook gate; partial implementation.**
+
+[MS-OXCMSG] §2.2.2.9 says itemAttachment is an "Embedded Message Object". M7 ships: `buildAttachmentPc` for `AttachmentKind::Item` recursively calls `buildMailPc` on the embedded message and stores the resulting HN bytes as `PidTagAttachDataBinary` (PtypBinary, tag 0x37010102), with `PidTagAttachMethod` = 5 (afEmbeddedMessage).
+
+**Limitation**: nested subnodes (large body / inner attachments of the embedded message) are dropped — only the embedded HN body crosses into the parent. Multi-level nested attachments are M10 hardening.
+
+**Catches it**: open an M7 PST with an item attachment in Outlook. Click on the embedded message — if it opens with the right subject/body, encoding is accepted. Inner attachments missing = expected M10 work.
+
+### M7-5 — itemAttachment max nesting depth
+
+**Status: tolerated.**
+
+No explicit cap enforced. Recursion depth is bounded by the Graph parse tree's depth. Combined with M7-4's "drop nested subnodes" simplification, deeply nested cases degrade gracefully.
+
+### M7-6 — PidTagMessageFlags bit composition
+
+**Status: VERIFIED via decode round-trip.**
+
+`computeMessageFlags(GraphMessage)` sets:
+- `mfRead`        (0x0001) when `isRead = true`
+- `mfUnsent`      (0x0008) when `isDraft = true`
+- `mfHasAttach`   (0x0010) when attachments present
+
+Verified by `[mail_pc_round_trip]` test: input `isRead=true + hasAttachments=true` produces inline value `0x00000011`.
+
+`mfUnmodified` (0x0002), `mfFromMe` (0x0020), `mfFAI` (0x0040), other bits: not set. M10 hardening can refine.
+
+### M7-7 — PidTagSearchKey derivation
+
+**Status: tolerated.**
+
+`graph::deriveSearchKey(smtpAddress)` produces 16 bytes: `"SMTP:" + UPPER(address)` truncated/zero-padded to 16. Deterministic; case-insensitive. Test `[m7][graph_convert] deriveSearchKey deterministic` confirms.
+
+[MS-OXOMSG] doesn't pin the exact derivation rule beyond the "SMTP:<addr>" convention; this implementation is one defensible choice.
+
+### M7-8 — RFC 2822 internet header round-trip
+
+**Status: VERIFIED via decode round-trip.**
+
+`serializeInternetHeaders` produces "Name: Value\r\n" pairs concatenated. `[mail_headers]` test confirms exact output for a 2-header sample.
+
+`buildMailPc` populates `PidTagTransportMessageHeaders` (0x007D001F, PtypString) with the UTF-16-LE encoding of this serialized text. Outlook's MIME re-roundtrip is a manual verification at gate 10.
+
+### M7-9 — Inbox NID assignment strategy
+
+**Status: tolerated.**
+
+`writeM7Pst` allocates folder NIDs dynamically via `M5Allocator::allocate(NormalFolder)`. There's no hardcoded NID for "Inbox" — Graph's `parentFolderId = "Inbox"` doesn't drive anything spec-shaped at the byte level.
+
+`PidTagIpmInboxEntryId` is NOT yet emitted at the message store PC level. If Outlook resolves "Inbox" via that property, it'll fall back to walking IPM Subtree's hierarchy. M10 hardening can add it.
+
+### M7-10 — Folder ContainerClass casing
+
+**Status: tolerated.**
+
+`M7Folder::containerClass` defaults to "IPF.Note" (mixed case). `buildMailFolderPc` test confirms emission via PidTag 0x3613001F (PtypString). Outlook tolerance to casing is gate 10.
+
 ## How to use this file
 
 When validation against real Outlook becomes possible:
