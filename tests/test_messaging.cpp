@@ -721,6 +721,143 @@ TEST_CASE("buildNameToIdMapPc emits the 4 well-known empty-state properties",
 }
 
 // ============================================================================
+// M6.10 — buildRecipientTemplateTc structural validation.
+// ============================================================================
+TEST_CASE("buildRecipientTemplateTc emits 14-column empty Recipient Template",
+          "[m6][recipient_tc][m6_gate]")
+{
+    const TcResult result = buildRecipientTemplateTc();
+    REQUIRE_FALSE(result.hnBytes.empty());
+    const uint8_t* hn = result.hnBytes.data();
+    REQUIRE(hn[3] == 0x7Cu);   // bClientSig (TC)
+
+    const uint16_t ibHnpm = detail::readU16(hn, 0);
+    const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
+
+    REQUIRE(hn[tciOff + 0] == 0x7Cu);
+    REQUIRE(hn[tciOff + 1] == 0x0Eu);   // cCols = 14
+    REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);  // hnidRows = 0
+
+    // Spot-check a few TCOLDESCs (tag, ibData) — the writer sorts by tag,
+    // so the on-disk order is tag-ascending regardless of caller input.
+    struct Pin { uint32_t tag; uint16_t ibData; };
+    const Pin pins[] = {
+        { 0x0C150003u,  8 },  // RecipientType
+        { 0x0E0F000Bu, 48 },  // Responsibility
+        { 0x0FF90102u, 12 },  // RecordKey (HID)
+        { 0x3001001Fu, 24 },  // DisplayName (HID)
+        { 0x67F20003u,  0 },  // LtpRowId
+        { 0x67F30003u,  4 },  // LtpRowVer
+    };
+    for (const auto& pin : pins) {
+        // Find the TCOLDESC for this tag by scanning all 14.
+        bool found = false;
+        for (size_t i = 0; i < 14; ++i) {
+            const size_t off = tciOff + 22 + i * 8;
+            if (detail::readU32(hn, off + 0) == pin.tag) {
+                REQUIRE(detail::readU16(hn, off + 4) == pin.ibData);
+                found = true;
+                break;
+            }
+        }
+        INFO("looking for tag 0x" << std::hex << pin.tag);
+        REQUIRE(found);
+    }
+}
+
+// ============================================================================
+// M6.11 — buildAttachmentTemplateTc structural validation.
+// ============================================================================
+TEST_CASE("buildAttachmentTemplateTc emits 6-column empty Attachment Template",
+          "[m6][attachment_tc][m6_gate]")
+{
+    const TcResult result = buildAttachmentTemplateTc();
+    REQUIRE_FALSE(result.hnBytes.empty());
+    const uint8_t* hn = result.hnBytes.data();
+    REQUIRE(hn[3] == 0x7Cu);
+
+    const uint16_t ibHnpm = detail::readU16(hn, 0);
+    const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
+
+    REQUIRE(hn[tciOff + 0] == 0x7Cu);
+    REQUIRE(hn[tciOff + 1] == 0x06u);   // cCols = 6
+    REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);  // hnidRows = 0
+
+    struct ExpectedCol { uint32_t tag; uint16_t ibData; uint8_t cbData; uint8_t iBit; };
+    const ExpectedCol expected[6] = {
+        { 0x0E200003u,  8, 4, 2 },   // AttachSize
+        { 0x3704001Fu, 12, 4, 3 },   // AttachFilenameW (HID)
+        { 0x37050003u, 16, 4, 4 },   // AttachMethod
+        { 0x370B0003u, 20, 4, 5 },   // RenderingPosition
+        { 0x67F20003u,  0, 4, 0 },   // LtpRowId
+        { 0x67F30003u,  4, 4, 1 },   // LtpRowVer
+    };
+    for (size_t i = 0; i < 6; ++i) {
+        const size_t off = tciOff + 22 + i * 8;
+        INFO("Attachment TCOLDESC[" << i << "] expected tag=0x"
+             << std::hex << expected[i].tag);
+        REQUIRE(detail::readU32(hn, off + 0) == expected[i].tag);
+        REQUIRE(detail::readU16(hn, off + 4) == expected[i].ibData);
+        REQUIRE(hn[off + 6]                  == expected[i].cbData);
+        REQUIRE(hn[off + 7]                  == expected[i].iBit);
+    }
+}
+
+// ============================================================================
+// M6.9 — Search Contents Template (0x0610). KNOWN_UNVERIFIED: best-effort
+// shares the Contents Template schema. Test confirms it's a structurally
+// valid empty TC; full schema validation pinned by the
+// `[m6][contents_tc_3_12]` test.
+// ============================================================================
+TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
+          "[m6][search_contents_tc]")
+{
+    const TcResult result = buildSearchContentsTemplateTc();
+    REQUIRE_FALSE(result.hnBytes.empty());
+    const uint8_t* hn = result.hnBytes.data();
+    REQUIRE(hn[3] == 0x7Cu);
+    const uint16_t ibHnpm = detail::readU16(hn, 0);
+    const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
+    REQUIRE(hn[tciOff + 1] == 0x1Bu);   // cCols = 27 (matches Contents)
+    REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);
+}
+
+// ============================================================================
+// M6.4 — Search Folder PC (0x2223). KNOWN_UNVERIFIED: best-effort shares
+// the regular FolderPc 4-property schema.
+// ============================================================================
+TEST_CASE("buildSearchFolderPc round-trips with FolderPc schema",
+          "[m6][search_folder_pc]")
+{
+    FolderPcSchema schema{};
+    schema.hasSubfolders = false;
+
+    const PcResult result = buildSearchFolderPc(schema, Nid{0x00000041u});
+    REQUIRE_FALSE(result.hnBytes.empty());
+
+    const auto props = readPropertyContext(result.hnBytes.data(),
+                                           result.hnBytes.size());
+    REQUIRE(props.size() == 4u);
+    REQUIRE(findProp(props, 0x3001u) != nullptr);  // DisplayName
+    REQUIRE(findProp(props, 0x3602u) != nullptr);  // ContentCount
+    REQUIRE(findProp(props, 0x3603u) != nullptr);  // ContentUnreadCount
+    REQUIRE(findProp(props, 0x360Au) != nullptr);  // Subfolders
+}
+
+// ============================================================================
+// Bare nodes (0x01E1, 0x0201) — buildEmptyNodePayload returns 4 zero bytes.
+// ============================================================================
+TEST_CASE("buildEmptyNodePayload returns 4 zero bytes",
+          "[m6][bare_node]")
+{
+    const auto payload = buildEmptyNodePayload();
+    REQUIRE(payload.size() == 4u);
+    for (size_t i = 0; i < 4; ++i) {
+        REQUIRE(payload[i] == 0u);
+    }
+}
+
+// ============================================================================
 // M6.1 — EntryID encoder shape verification.
 //
 // Reproduces all 3 §3.10 EntryIDs byte-for-byte from the schema-side

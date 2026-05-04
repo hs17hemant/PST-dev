@@ -351,6 +351,52 @@ or QWORD = 8-byte), update `buildHeapOnNode` accordingly.
 
 **Catches it**: Outlook open / scanpst on an M6 PST with NID 0x0061 emitted via `buildNameToIdMapPc()`. If Outlook rejects (likely error: "missing required hash bucket properties"), upgrade to option (B).
 
+### Recipient / Attachment Template ibData layout (writer choice)
+
+**Status: writer chose; no spec evidence either way.**
+
+[MS-PST] Recipient Template (0x0692) and Attachment Table Template (0x0671) sub-pages list each column's PidTag + PropType but DO NOT specify ibData / iBit assignments for the row layout. The spec leaves these to the implementation — any layout that honors §2.3.4.4.1 invariants (LtpRowId at iBit=0/ibData=0, LtpRowVer at iBit=1/ibData=4) is legal.
+
+M6 ships:
+- Recipient Template: ibData={0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 49} for the 14 cols (4-byte then 1-byte regions); endBm = 52.
+- Attachment Template: ibData={0, 4, 8, 12, 16, 20} for the 6 cols (all 4-byte); endBm = 25 (24 fixed + 1 CEB).
+
+**Risk**: real Outlook may expect a specific ibData ordering, and our schema may not match. Phase E real-Outlook validation will surface any mismatch.
+
+**Catches it**: Outlook open / scanpst on an M6 PST. If Outlook rejects with "invalid Recipient/Attachment Table layout", inspect a real-Outlook PST and align ibData/iBit values.
+
+### Search Contents Template schema (0x0610) — best-effort guess
+
+**Status: pre-registered; spec page absent from public [MS-PST] documentation.**
+
+[MS-PST] §2.7.1 lists `NID_SEARCH_CONTENTS_TABLE_TEMPLATE` (0x0610) as a mandatory "Columns Only" TC, but [MS-PST] does NOT publish a dedicated sub-page for its schema (unlike the Contents Template, Hierarchy Template, Recipient Template, Attachment Template — each of which has its own §2.7.x sub-page).
+
+M6 ships the same column schema as the Contents Template (0x060E) — search-folder rows are message-shaped, so reusing the 27-column Contents schema is a defensible default.
+
+**Risk**: search folders may need extra columns for search criteria, search state, search-key indexing. Real-Outlook validation will reveal.
+
+**Catches it**: Outlook open on an M6 PST. If Outlook rejects 0x0610 specifically, extract a real-Outlook search folder's TC schema and update.
+
+### Search Folder PC schema (NID 0x2223) — best-effort guess
+
+**Status: pre-registered; spec doesn't pin the property set.**
+
+[MS-PST] §2.7.1 lists 0x2223 as `<Spam search Folder>` with `nidType = SEARCH_FOLDER (0x03)` and "PC / Schema Props" minimal state. The exact property schema is not pinned in the spec text reachable so far.
+
+M6 ships the same 4-property schema as a regular folder PC (DisplayName, ContentCount, ContentUnreadCount, Subfolders). Real Outlook may include search-specific properties such as PR_SEARCH_KEY, PR_CONTAINER_FLAGS, search-criteria props per [MS-OXOSRCH].
+
+**Catches it**: Outlook open / scanpst on M6 PST. Extract a real-Outlook PST's NID 0x2223 (or any search-folder PC) and align the schema.
+
+### Bare-node payload (NIDs 0x01E1, 0x0201) — 4 zero bytes
+
+**Status: pre-registered; spec says only "Empty".**
+
+[MS-PST] §2.7.1 marks `NID_SEARCH_MANAGEMENT_QUEUE` (0x01E1) and `NID_SEARCH_ACTIVITY_LIST` (0x0201) as `Object = "node"` (lowercase, not PC or TC) with `Minimal state = "Empty"`. The spec doesn't pin a payload size or content for these bare-node entries.
+
+M6 emits a 4-byte zero payload (smallest legal data block payload, DWORD-aligned). The block gets its own BBT entry and an NBTENTRY pointing at it with `bidSub = 0`.
+
+**Catches it**: Outlook open / scanpst on M6 PST. If Outlook expects a different payload (e.g. structured 8-byte queue header), extract a real-Outlook PST's 0x01E1 / 0x0201 blocks and update.
+
 ### PidTagContainerClass type discrepancy: §2.7 vs §3.12
 
 **Status: pre-registered. Two different spec pages disagree on the propType.**

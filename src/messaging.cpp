@@ -372,4 +372,79 @@ PcResult buildNameToIdMapPc(Nid firstSubnodeNid)
     return buildPropertyContext(props, 4, firstSubnodeNid);
 }
 
+// ----------------------------------------------------------------------------
+// buildRecipientTemplateTc — 14-column TC per [MS-PST] Recipient Template.
+//
+// Layout: LtpRowId at 0, LtpRowVer at 4, then 4-byte cols (incl. HID slots),
+// then 1-byte cols. iBit assignments place LtpRowId/Ver at 0/1 then
+// remaining cols by tag-ascending. Per-row endBm = 52.
+// ----------------------------------------------------------------------------
+namespace {
+
+constexpr TcColumn kRecipientCols[14] = {
+    // tag-sorted ascending; ibData chosen for compact 4B-then-1B layout
+    { 0x0C15u, PropType::Int32,    8, 4,  2 },  // RecipientType
+    { 0x0E0Fu, PropType::Boolean, 48, 1,  3 },  // Responsibility
+    { 0x0FF9u, PropType::Binary,  12, 4,  4 },  // RecordKey (HID)
+    { 0x0FFEu, PropType::Int32,   16, 4,  5 },  // ObjectType
+    { 0x0FFFu, PropType::Binary,  20, 4,  6 },  // EntryId (HID)
+    { 0x3001u, PropType::Unicode, 24, 4,  7 },  // DisplayName (HID)
+    { 0x3002u, PropType::Unicode, 28, 4,  8 },  // AddressType (HID)
+    { 0x3003u, PropType::Unicode, 32, 4,  9 },  // EmailAddress (HID)
+    { 0x300Bu, PropType::Binary,  36, 4, 10 },  // SearchKey (HID)
+    { 0x3900u, PropType::Int32,   40, 4, 11 },  // DisplayType
+    { 0x39FFu, PropType::Unicode, 44, 4, 12 },  // 7BitDisplayName (HID)
+    { 0x3A40u, PropType::Boolean, 49, 1, 13 },  // SendRichInfo
+    { 0x67F2u, PropType::Int32,    0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,    4, 4,  1 },  // LtpRowVer
+};
+
+constexpr TcColumn kAttachmentCols[6] = {
+    { 0x0E20u, PropType::Int32,    8, 4,  2 },  // AttachSize
+    { 0x3704u, PropType::Unicode, 12, 4,  3 },  // AttachFilenameW (HID)
+    { 0x3705u, PropType::Int32,   16, 4,  4 },  // AttachMethod
+    { 0x370Bu, PropType::Int32,   20, 4,  5 },  // RenderingPosition
+    { 0x67F2u, PropType::Int32,    0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,    4, 4,  1 },  // LtpRowVer
+};
+
+} // namespace
+
+TcResult buildRecipientTemplateTc()
+{
+    return buildTableContext(kRecipientCols, 14, nullptr, 0);
+}
+
+TcResult buildAttachmentTemplateTc()
+{
+    return buildTableContext(kAttachmentCols, 6, nullptr, 0);
+}
+
+// ----------------------------------------------------------------------------
+// buildSearchContentsTemplateTc — best-guess; reuses Contents Template schema.
+// KNOWN_UNVERIFIED: spec page absent, may need search-specific columns.
+// ----------------------------------------------------------------------------
+TcResult buildSearchContentsTemplateTc()
+{
+    return buildFolderContentsTc();
+}
+
+// ----------------------------------------------------------------------------
+// buildSearchFolderPc — best-guess; reuses regular FolderPc schema.
+// KNOWN_UNVERIFIED: spec doesn't pin Search Folder PC's exact property set.
+// ----------------------------------------------------------------------------
+PcResult buildSearchFolderPc(const FolderPcSchema& schema,
+                             Nid                   firstSubnodeNid)
+{
+    return buildFolderPc(schema, firstSubnodeNid);
+}
+
+// ----------------------------------------------------------------------------
+// buildEmptyNodePayload — 4 zero bytes for bare-node "Empty" §2.7.1 entries.
+// ----------------------------------------------------------------------------
+vector<uint8_t> buildEmptyNodePayload()
+{
+    return vector<uint8_t>(4u, 0u);
+}
+
 } // namespace pstwriter

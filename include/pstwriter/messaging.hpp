@@ -278,4 +278,81 @@ TcResult buildFolderFaiContentsTc();
 // ============================================================================
 PcResult buildNameToIdMapPc(Nid firstSubnodeNid);
 
+// ============================================================================
+// buildRecipientTemplateTc — emit NID_RECIPIENT_TABLE (0x0692).
+//
+// 14 columns per [MS-PST] "Recipient Table Template" sub-page:
+//   0x0C15 PidTagRecipientType    PtypInteger32
+//   0x0E0F PidTagResponsibility   PtypBoolean
+//   0x0FF9 PidTagRecordKey        PtypBinary
+//   0x0FFE PidTagObjectType       PtypInteger32
+//   0x0FFF PidTagEntryId          PtypBinary
+//   0x3001 PidTagDisplayName      PtypString
+//   0x3002 PidTagAddressType      PtypString
+//   0x3003 PidTagEmailAddress     PtypString
+//   0x300B PidTagSearchKey        PtypBinary
+//   0x3900 PidTagDisplayType      PtypInteger32
+//   0x39FF PidTag7BitDisplayName  PtypString
+//   0x3A40 PidTagSendRichInfo     PtypBoolean
+//   0x67F2 PidTagLtpRowId         PtypInteger32
+//   0x67F3 PidTagLtpRowVer        PtypInteger32
+//
+// Always 0-row in M6 (no messages → no recipients yet).
+// ============================================================================
+TcResult buildRecipientTemplateTc();
+
+// ============================================================================
+// buildAttachmentTemplateTc — emit NID_ATTACHMENT_TABLE (0x0671).
+//
+// 6 columns per [MS-PST] "Attachment Table Template" sub-page:
+//   0x0E20 PidTagAttachSize         PtypInteger32
+//   0x3704 PidTagAttachFilenameW    PtypString
+//   0x3705 PidTagAttachMethod       PtypInteger32
+//   0x370B PidTagRenderingPosition  PtypInteger32
+//   0x67F2 PidTagLtpRowId           PtypInteger32
+//   0x67F3 PidTagLtpRowVer          PtypInteger32
+//
+// Always 0-row in M6.
+// ============================================================================
+TcResult buildAttachmentTemplateTc();
+
+// ============================================================================
+// buildSearchContentsTemplateTc — emit NID_SEARCH_CONTENTS_TABLE_TEMPLATE
+// (0x0610).
+//
+// **Open question (KNOWN_UNVERIFIED)**: [MS-PST] does not publish a
+// dedicated "Search Contents Table Template" page. M6 ships the same
+// schema as the Contents Table Template (0x060E) since search-folder
+// contents are message-shaped. Real-Outlook validation may reject if
+// search folders need extra columns (search criteria, search state).
+// ============================================================================
+TcResult buildSearchContentsTemplateTc();
+
+// ============================================================================
+// buildSearchFolderPc — emit Search Folder PC (NID 0x2223 = Spam search Folder).
+//
+// **Open question (KNOWN_UNVERIFIED)**: [MS-PST] §2.7.1 lists 0x2223 as
+// "PC / Schema Props" with `nidType = SEARCH_FOLDER` (0x03). The exact
+// property schema for a search folder PC is not pinned by the spec text
+// reachable so far. M6 ships the same 4-property schema as a regular
+// folder PC (DisplayName, ContentCount, ContentUnreadCount, Subfolders).
+// Real-Outlook validation may surface additional search-specific properties.
+// ============================================================================
+PcResult buildSearchFolderPc(const FolderPcSchema& schema,
+                             Nid                   firstSubnodeNid);
+
+// ============================================================================
+// buildEmptyNodePayload — bare-node payload for §2.7.1 "node / Empty" rows
+// (NIDs 0x01E1 NID_SEARCH_MANAGEMENT_QUEUE and 0x0201 NID_SEARCH_ACTIVITY_LIST).
+//
+// Returns 4 zero bytes. The caller (Phase D end-to-end writer) wraps this
+// with buildDataBlock to produce the on-disk encoded data block, then
+// registers an NBTENTRY pointing at that block's BID with bidSub=0.
+//
+// **Open question (KNOWN_UNVERIFIED)**: §2.7.1 says "Empty" but doesn't
+// pin a payload size or content. 4 zero bytes is the smallest legal data
+// block payload. Real-Outlook validation may reveal a different shape.
+// ============================================================================
+std::vector<uint8_t> buildEmptyNodePayload();
+
 } // namespace pstwriter
