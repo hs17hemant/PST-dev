@@ -1214,7 +1214,7 @@ Per-message attachment rows. Pre-Phase-B: pin column schema (PidTagAttachNumber,
 
 ### Gate items: "M6 done"
 
-1. `buildMessageStorePc(...)` exists; `[m6][message_store_3_10]` byte-diff test reproduces §3.10 / §3.8 HN bytes exactly when fed §3.10's logical inputs (display name "UNICODE1", PidTagRecordKey GUID `22 9D B5 0A...12 70`, ValidFolderMask 0x89, three NIDs 0x8022/0x8042/0x8062). All 11 §3.9-BTH-observed properties emitted.
+1. `buildMessageStorePc(...)` exists. `[m6][message_store_round_trip]` test feeds §3.10's logical inputs (display name "UNICODE1", PidTagRecordKey GUID `22 9D B5 0A...12 70`, ValidFolderMask 0x89, three NIDs 0x8022/0x8042/0x8062), takes the resulting HN bytes through `readPropertyContext`, and verifies all 11 properties decode to the §3.10-published values. **Byte-diff against §3.8 sample is NOT a goal**: §3.8's HN allocation order (sizes 16, 16, 24, 24, 24, 24) doesn't match our M4 PC writer's PidTag-ascending HID assignment (which would emit 24, 16, 16, 24, 24, 24 for the same 6 HN-stored props). Real Outlook allocated §3.8's slots in some history-driven order — same lesson as M4 §3.9 cross-validation. Round-trip semantic equivalence is the realistic gate; the existing M5 `[semantic_decode_3_10]` test locks the read-side decode.
 2. `buildRootFolderPc(...)` exists; emits the §3.12 4-property PC bytes deterministically.
 3. `buildSubfolderPc(...)` (NORMAL_FOLDER) and `buildSearchFolderPc(...)` (SEARCH_FOLDER for NID 0x2223) exist.
 4. `buildFolderHierarchyTc(...)` / `buildFolderContentsTc(...)` / `buildFolderFaiContentsTc(...)` exist; `[m6][hierarchy_tc_3_12]` byte-diff test reproduces §3.12's Hierarchy TC for the 3-sub-folder case. Empty-row TC byte shape verified against §3.12 Contents/FAI.
