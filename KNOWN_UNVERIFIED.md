@@ -573,6 +573,48 @@ Verified by `[mail_pc_round_trip]` test: input `isRead=true + hasAttachments=tru
 
 `M7Folder::containerClass` defaults to "IPF.Note" (mixed case). `buildMailFolderPc` test confirms emission via PidTag 0x3613001F (PtypString). Outlook tolerance to casing is gate 10.
 
+## M8 — Contacts (Graph Contact → IPM.Contact)
+
+### M8-1 — Contact email storage uses PidTag instead of PidLid named property
+
+**Status: tolerated; Outlook contact-UI verification pending.**
+
+[MS-OXOCNTC] §2.2.1.1 says contact email addresses use named properties: `PidLidEmail1Address`, `PidLidEmail1AddressType`, `PidLidEmail1DisplayName`, with PSETID_Address GUID and dispid 0x8083/0x8084/0x8080 respectively. Named properties require `Name-to-ID Map` (NID 0x0061) population beyond M6's empty-state shape.
+
+M8 ships: emits `PidTagEmailAddress_W` (0x3003001F) — the recipient-form tag — populated with `emailAddresses[0].address`, plus `PidTagAddressType_W` (0x3002001F) = "SMTP".
+
+**Risk**: Outlook's contact UI reads the named-property variant exclusively. The PidTag variant likely shows up in `readPropertyContext` round-trips (verified in `[contact_pc_round_trip]` tests) but may not surface in Outlook's contact card.
+
+**Catches it**: open `m8_contacts.pst` in Outlook; verify the contact's email field is populated. If empty: M10 hardening adds Name-to-ID Map machinery + named-property emission.
+
+### M8-2 — Contact photo attachment
+
+**Status: deferred to M10.**
+
+Graph's contact resource doesn't carry inline photo bytes; the photo is fetched separately via `/contacts/{id}/photo/$value`. M8 doesn't fetch photos.
+
+[MS-OXOCNTC] §2.2.1.5 says photo is `PidLidContactPhoto` (named property) with `PidTagAttachmentContactPhoto` (0x7FFF000B) marker on the attachment row. M7's `buildAttachmentPc` is already generic enough to handle this — M10 hardening wires it.
+
+**Catches it**: not applicable — Outlook simply shows the contact without a photo.
+
+### M8-3 — PidLidFileAs (named property)
+
+**Status: deferred.**
+
+Outlook's "File As" field for contacts is `PidLidFileAs` (PSETID_Common, dispid 0x8005). When absent, Outlook computes a default from `PidTagDisplayName_W` ("Last, First" or "First Last" per user setting).
+
+M8 emits `PidTagDisplayName` and `PidTagSubject` to the same display name. Outlook should populate "File As" from these.
+
+**Catches it**: open M8 PST in Outlook; check if contact's "File As" matches displayName. If not, named-property machinery required (same as M8-1).
+
+### M8-4 — Multi-email contacts
+
+**Status: deferred.**
+
+M8 emits only the first `emailAddresses[0]`. Real contacts can have 2-3 emails (work / personal / other). Outlook expects `PidLidEmail1Address`, `PidLidEmail2Address`, `PidLidEmail3Address`.
+
+**Catches it**: open M8 PST in Outlook; check that secondary emails are missing. M10 hardening (named props) addresses.
+
 ## How to use this file
 
 When validation against real Outlook becomes possible:

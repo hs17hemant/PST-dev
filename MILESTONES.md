@@ -14,9 +14,11 @@ right", not "the test suite passes".
 | M3 | Block writer — data block, XBLOCK/XXBLOCK, SLBLOCK/SIBLOCK, BBT pagination | • [MS-PST] §3.5 BBT-leaf body + wSig pinned (dwCRC anomaly logged in `KNOWN_UNVERIFIED.md`).<br>• [MS-PST] §3.6 XBLOCK round-trips byte-for-byte including stored dwCRC (`[golden_spec_data_tree]`).<br>• [MS-PST] §3.7 SLBLOCK body + wSig pinned (dwCRC same anomaly as §3.5).<br>• `pst_info` walks block-bearing PSTs and CRC-checks every block. | ✅ green |
 | M4 | LTP layer — Heap-on-Node, BTH, PropertyContext, TableContext | • [MS-PST] §3.8 *Sample Heap-on-Node* round-trips byte-for-byte (`[golden_spec_hn]`).<br>• [MS-PST] §3.9 *Sample BTH* round-trips byte-for-byte (`[golden_spec_bth]`).<br>• [MS-PST] §3.11 *Sample TC* round-trips byte-for-byte (`[golden_spec_tc]`).<br>• Synthetic-PC oracle: 7 props (Int32, Unicode strings, MultipleString, oversized Binary→subnode) round-trip prop-by-prop (`[ltp][pc][synthetic_pc_composition]`).<br>• `pst_info` walks LTP-bearing PSTs (`[ltp][pst_info][end_to_end]`) with zero regressions on M3 PSTs (`[ltp][pst_info][m3_regression]`).<br>• All M1–M3 tests stay green; final 82 cases / 2021 assertions / 0 failed. | ✅ green |
 | M5 | NBT navigation + node-graph wiring — NBT intermediate-page pagination, NID registration, NBT entries for M3 blocks + M4 LTP nodes, no orphan blocks | • [MS-PST] §3.3 *Sample Intermediate BT Page* round-trips byte-for-byte (`[golden_spec_bt_intermediate]`).<br>• NID assignment writer-deterministic, reader NID-order-agnostic (Phase A `[m5][allocator]` × 14 cases + Phase C `[non_monotonic_nids]`).<br>• NBT intermediate-level pagination green (Phase B `[pagination]` multi-leaf, Phase C reader descends through intermediate).<br>• End-to-end PST: PC + TC + NBT entries, `pst_info` ALL CHECKS PASSED, NBT walk yields exactly the expected NIDs (`[m5][end_to_end][m5_gate]`).<br>• Semantic decodes green:<br>&nbsp;&nbsp;– `[semantic_decode_3_10]`: §3.8 HN decoded as message store PC; all 9 §3.10-named props found with matching types/values.<br>&nbsp;&nbsp;– `[semantic_decode_3_12]`: §3.11 TC contains the 3 folder name strings from §3.12 plus matching RowIndex BTH RowIDs.<br>• **REAL-OUTLOOK GATE**: relocated to M6 (= the milestone where messaging-layer mandatory-nodes per §2.7.1 are written). Documented in M5 closure subsection.<br>• Final M5 test counts: 121 cases / 4626 assertions / 0 SKIPPED / 0 failed. | ✅ green |
-| M6 | Messaging core — message store, name-to-id map, root IPM folder, wastebasket, finder folder, all mandatory NIDs from §2.4.8 | TBD. Likely: §3.10 *Sample Message Store* + §3.12 *Sample Folder Object* full round-trip via writer (M5's semantic decodes are reader-only); mandatory-NID enumeration matches spec table. | ⏳ pending |
-| M7 | Messages and attachments | TBD. Likely: §3.13 *Sample Message Object* round-trip; attachment with embedded message; produced PST opens in Outlook with messages. | ⏳ pending |
-| M8 | Hardening and release | MSVC `/W4 /WX` clean; fuzz `pst_info` against malformed inputs; produce a non-trivial PST that round-trips through Outlook → libpff → our reader. | ⏳ pending |
+| M6 | Messaging core — 27 §2.7.1 mandatory nodes (message store, name-to-id map, root IPM folder, wastebasket, finder, templates, hierarchy/contents/FAI tables) | • All 27 mandatory nodes per §2.7.1 produced + parented correctly.<br>• `m6_full_pst.pst` passes `pst_info` ALL CHECKS PASSED.<br>• CRC-scope retrospective fixed (commit `5c4a5c6`); §3.7 SLBLOCK byte-for-byte includes dwCRC.<br>• 8 KNOWN_UNVERIFIED entries from real-Outlook validation pass against backup.pst resolved. | ✅ green |
+| M7 | Mail content — Graph Message JSON → IPM.Note PSTs | • Graph JSON parser + 32+ field extraction.<br>• `buildMailPc(GraphMessage)` PC; recipient TC; HTML body; file + item attachments; multi-recipient; internet headers; folder hierarchy with PidTagContainerClass.<br>• `writeM7Pst` end-to-end with SLBLOCK assembly for message subnodes.<br>• `m7_full_pst.pst` (17 KB) passes `pst_info` ALL CHECKS PASSED. | ✅ green (Outlook open pending) |
+| M8 | Contacts — Graph Contact JSON → IPM.Contact PSTs | • Graph contact parser; `buildContactPc` with ~30 top-level PidTags (name parts, company, phones, addresses, birthday).<br>• `writeM8Pst` end-to-end; "IPF.Contact" folder ContainerClass.<br>• `m8_contacts.pst` (14 KB) passes `pst_info` ALL CHECKS PASSED. | ✅ green (Outlook open pending) |
+| M9 | Calendar — Graph Event JSON → IPM.Appointment PSTs | TBD. Mirrors M8 structure: parser + PC builder + end-to-end writer; "IPF.Appointment" folder ContainerClass; recurring-event expansion as a known limitation. | ⏳ pending |
+| M10 | Production hardening + release | MSVC `/W4 /WX` clean (sixth-deferral honoring required); fuzz `pst_info` against malformed inputs; named-property infrastructure (Name-to-ID Map population) for contact emails / file-as / etc.; multi-block HN; refactor 27-node baseline into shared helper across M6/M7/M8/M9. | ⏳ pending |
 
 ## Why the M4 gate is shaped this way
 
@@ -2026,3 +2028,98 @@ is provisional pending the Outlook open. If real-Outlook rejects with a
 specific failure mode, the corresponding KNOWN_UNVERIFIED M7-N entry is
 upgraded with the contradiction and the relevant builder fixed in a
 follow-up.
+
+---
+
+## M8 — Contacts (Graph Contact JSON → IPM.Contact PST)
+
+### Scope
+
+Per the project-wide context update at M7 pre-flight: M8 = contacts.
+Graph `contact` resource → Outlook-compatible PST containing
+`IPM.Contact` PCs in `IPF.Contact` folders.
+
+This milestone is intentionally tighter in scope than M7. Contacts
+have no recipients, no attachment table, no message-tree subnodes.
+Each contact lands as a single PC node parented to its containing
+folder.
+
+### Phasing (3 phases — half of M7's 5)
+
+| Phase | Scope delivered | Tests |
+|---|---|---|
+| **A** | `GraphContact` struct + JSON parser tolerant of unknown fields. Shared internal JSON parser extracted to `src/internal_json.hpp` for M9 reuse. | `test_m8_contact.cpp` Phase A (7) |
+| **B** | `buildContactPc(GraphContact, ctx)` IPM.Contact PC. ~30 top-level scalar PidTags: name parts (givenName/surname/middleName/nickName/initials/generation/title/jobTitle), company/department/office/profession, phones (business/home/mobile), business + home addresses, birthday + creation/modification times, single-email fallback, concatenated postal address. | `test_m8_contact.cpp` Phase B (8) |
+| **C** | `writeM8Pst(M8PstConfig)` end-to-end. 27 §2.7.1 mandatory nodes + per-`M8ContactFolder`: folder PC (containerClass = "IPF.Contact") + 3 sibling tables. Per contact: a single PC node. IPM Subtree's Hierarchy TC populated with each contacts folder. | `test_m8_contact.cpp` Phase C (3) |
+
+### Test counts
+
+```
+Pre-M8:    195 cases | 193 passed | 2 skipped | 5479 assertions
+Post-M8:   213 cases | 211 passed | 2 skipped | 5540 assertions
+Δ:         +18 cases | +18 passed | 0 skip    | +61 assertions
+```
+
+### Exit gate
+
+| Item | Description | Status | Evidence |
+|---|---|---|---|
+| 1 | Graph contact JSON parsing layer | ✅ MET | 7 cases including phones, addresses, emailAddresses array, unknown-field tolerance, list envelope |
+| 2 | Contact PC round-trip | ✅ MET | 8 `[contact_pc_round_trip]` cases verify PidTag presence + decoded values via `readPropertyContext` |
+| 3 | Contacts folder with IPF.Contact ContainerClass | ✅ MET | `writeM8Pst` reuses `buildMailFolderPc` with `containerClass = "IPF.Contact"` |
+| 4 | Multiple contacts in multiple folders | ✅ MET | `[m8_pst_info]` test creates 2 folders with 3 contacts; pst_info ALL CHECKS PASSED |
+| 5 | pst_info ALL CHECKS PASSED on M8 PST | ✅ MET | `m8_contacts.pst` (14 KB, 12 PC + 22 TC) passes pst_info |
+| 6 | Opens cleanly in classic Outlook | ⏭️ DEFERRED | Manual gate per pre-M7 deferral commitment. Real-Outlook validation as standing safety net. |
+
+### Files added / modified
+
+**New library files:**
+- `include/pstwriter/graph_contact.hpp` + `src/graph_contact.cpp` — `GraphContact` + parser
+- `include/pstwriter/contact.hpp` + `src/contact.cpp` — `buildContactPc` + `writeM8Pst`
+- `src/internal_json.hpp` — shared JSON parser for M8/M9 (extracted from graph_message.cpp)
+
+**New test files:**
+- `tests/test_m8_contact.cpp` — 18 cases across 3 phases
+
+**Modified:**
+- `CMakeLists.txt` — registers M8 sources
+- `tests/CMakeLists.txt` — registers M8 tests
+
+### KNOWN_UNVERIFIED M8 candidates
+
+| ID | Topic | Status |
+|---|---|---|
+| **M8-1** | Contact email addresses via PidTag instead of PidLid named props | TOLERATED — Outlook gate pending. M8 emits `PidTagEmailAddress_W` (0x3003001F, recipient-form tag) for the first email; Outlook-native contact UI may not pick it up without `PidLidEmail1Address` (named property). M10 hardening adds Name-to-ID Map population. |
+| **M8-2** | Contact photo attachment | DEFERRED — M8 doesn't emit. Graph contact resource has no inline photo bytes; photos arrive via separate `/contacts/{id}/photo/$value`. M10 hardening can add via `buildAttachmentPc` (already generic per M7 Decision 6). |
+| **M8-3** | PidLidFileAs (named property) | DEFERRED — Outlook computes default file-as from displayName when absent. Verify at gate. |
+| **M8-4** | Multi-email contacts | DEFERRED — M8 emits only the first `emailAddresses[0]`. Multi-email requires named props per M8-1. |
+
+### Reuse from M7
+
+Per M7 Decision 6, M7 builders are generic over "thing-being-converted":
+
+| Builder | M7 use | M8 use (this milestone) |
+|---|---|---|
+| `buildMailFolderPc(M7FolderSchema)` | Inbox, Drafts, Sent (containerClass = "IPF.Note") | Contacts folder (containerClass = "IPF.Contact") |
+| `buildHeaderHierarchyTc / buildFolderContentsTc / buildFolderFaiContentsTc` | Folder sibling tables | Folder sibling tables (zero-row Contents) |
+| `MessageStoreSchema / buildMessageStorePc` | Message store PC | Same — message store carries no message-vs-contact distinction |
+| `M5Allocator` | Folder + message NID allocation | Folder + contact NID allocation (NormalMessage type for both) |
+
+The 27-mandatory-nodes baseline is duplicated between writeM7Pst and
+writeM8Pst (~200 lines). M10 hardening should extract a shared
+`writeBasePst` helper.
+
+### Risks — outcome
+
+| Risk | Outcome |
+|---|---|
+| Outlook rejects M8 PST | Pending — gate 6 manual. pst_info ALL CHECKS PASSED on internal validation. |
+| Contact email storage gap (M8-1) | TOLERATED. Pre-registered. M10 hardening addresses if Outlook surface degraded. |
+| 27-node baseline duplication | Acknowledged. M10 refactor item. |
+
+### M8 closure gate
+
+M8 phasing complete. Like M7, the real-Outlook open gate (item 6)
+remains manual. `m8_contacts.pst` (14 KB, 3 contacts in 2 folders)
+passes pst_info; Outlook open is the verification step the user holds
+the environment for.

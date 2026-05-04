@@ -35,6 +35,7 @@ add_executable(pstwriter_tests
     test_m7_graph_message.cpp
     test_m7_mail.cpp
     test_m7_end_to_end.cpp
+    test_m8_contact.cpp
     # pst_info source compiled into the test binary so the LTP
     # end-to-end test can call runPstInfo() directly. We define
     # PSTWRITER_PST_INFO_NO_MAIN to suppress the binary's main().
