@@ -73,52 +73,78 @@ Each row format:
 | [src/block.cpp](src/block.cpp) | Internal blocks (XBLOCK/XX/SL/SI) are NOT encrypted; only data blocks are encrypted | encrypt internals too | Spec §1.3.1.5 says encryption applies to "data blocks". libpff agrees | scanpst |
 | [tests/test_block.cpp `[golden_spec_bbt_leaf]`](tests/test_block.cpp) | The §3.5 BBT-leaf sample test does NOT compare the trailer's `dwCRC` byte-for-byte | strict byte-for-byte comparison | The spec's published `dwCRC=0xA1F6A02F` does NOT match `crc32(its-own-first-496-bytes)` under our PST CRC-32 (verified by §3.2 header end-to-end). The §3.5 sample also has BREF entries with 64-byte-misaligned IBs (e.g. ib=0x20B) — strongly suggests Microsoft hand-edited the dump for illustration without regenerating the CRC. Our test verifies bytes [0..499] (page body + ptype/ptypeRepeat/wSig), the wSig landmark (0x00D6), the bid (0x246), and self-consistent dwCRC | None — until a real Outlook BBT page lands in `tests/golden/`, this is the gap |
 
-### Spec-sample dwCRC anomalies (§3.5 BBT leaf and §3.7 SLBLOCK)
+### Spec-sample dwCRC anomalies (§3.5 BBT leaf and §3.7 SLBLOCK) — RESOLVED 2026-05-04
 
-**Status: blocked on a real Outlook-produced PST. NOT blocked on us.**
+**Status: RESOLVED. Original hypothesis was WRONG. Root cause was a CRC
+scope bug in our writer/reader, fixed in commit `5c4a5c6`.**
 
-The [MS-PST] published spec samples at:
+[MS-PST] published spec samples at:
 - §3.5 *Sample Leaf BBT Page* — stored dwCRC `0xA1F6A02F`
 - §3.7 *Sample SLBLOCK* — stored dwCRC `0xD9D45E50`
 
-both fail to match a re-computation of crc32 over their own pre-trailer
-bytes under our PST CRC-32 implementation. That same implementation
-**reproduces the §3.2 sample header's dwCRCPartial=0x379AA90E and
-dwCRCFull=0x1FD283D6 exactly**, AND **reproduces the §3.6 XBLOCK's
-stored dwCRC=0x3FEECD51 byte-for-byte** — so our CRC code is correct
-on the spec's own evidence.
+were both correct all along. Our writer was computing `dwCRC = crc32(buf,
+trailerOff)` (where `trailerOff = totalSize - 16` = cb + 64-byte alignment
+padding) instead of `crc32(buf, cb)` per [MS-PST §2.2.2.8.1] verbatim:
+*"dwCRC: 32-bit CRC of the **cb bytes** of raw data"*.
 
-Reasons we believe these two samples are hand-illustrated, not
-Outlook-extracted:
+**Resolution evidence**:
+- After commit `5c4a5c6` fixed [src/block.cpp](src/block.cpp), the §3.7 SLBLOCK byte-diff test was upgraded from "[0..52) + self-consistent CRC under wrong scope" to **full byte-for-byte against §3.7's published 64 bytes including stored dwCRC + bid in trailer**, and it passes.
+- pst_info on backup.pst (real Outlook PST): 50/243 → **243/243** block CRCs verified after fix.
+- §3.6 XBLOCK still passes: it had `cb = totalSize - 16 = 432` (no padding), so both the buggy and correct CRC scopes produce identical output. This coincidence is why §3.6 was a positive control under the wrong scope.
 
-- §3.5 also has BBTENTRY records with impossible IBs (e.g. `ib=0x20B`
-  is not a multiple of 64, but blocks must be 64-byte-aligned per
-  §2.2.2.8).
-- The §3.6 sample sits in the *same spec section* as §3.5/§3.7 and
-  has correct CRC. If a generic CRC bug affected the spec, all three
-  would diverge.
-- §3.5 / §3.7 are smaller, simpler illustrations — exactly the kind
-  the doc author would hand-edit; §3.6 is mechanical (53 sequential
-  BIDs) and easy to leave alone.
+**Why the original hypothesis was wrong**:
 
-**Why this is not blocking pstwriter**: our writer reproduces every
-spec-extractable byte of these structures (body + cb + wSig) and emits
-self-consistent dwCRC values via the same CRC code that has already
-been validated end-to-end by §3.2 and §3.6. Outlook will compute its
-own CRC at read-time over the bytes we wrote, so the only failure
-mode would be a generic CRC bug — which §3.2 + §3.6 already rule out.
+The reasoning chain that "§3.6 XBLOCK CRC matches → therefore our CRC code is correct → therefore §3.5/§3.7 must be hand-edited" had a hidden assumption: that §3.6 exercised every CRC code path. It didn't. §3.6 happened to have no alignment padding, so the buggy scope and correct scope produced bitwise-identical CRCs. The bug was invisible under §3.6's specific test conditions.
 
-**Action when an Outlook PST is available**: extract one real BBT page
-and one real SLBLOCK, byte-diff them against `buildBbtLeaf(...)` /
-`buildSlBlock(...)` output, and confirm stored dwCRCs match
-`crc32(...)`. Once that confirmation lands, this entry can be deleted.
+The "BREF entries with 64-byte-misaligned IBs (e.g. ib=0x20B)" observation in §3.5 was correct evidence of *something*, but we drew the wrong conclusion. It was evidence that §3.5 was a partial dump (BBTENTRY records were edited to fit on a sample page), not evidence that the CRC was hand-edited. The CRC was real.
 
-Tests that lock the §3.x oracles in:
-- `[golden_spec_header]` — §3.2, full byte-for-byte (PASSING)
-- `[golden_spec_nbt_leaf]` — §3.4, parse + CRC + wSig (PASSING)
-- `[golden_spec_bbt_leaf]` — §3.5, body + wSig + self-consistent CRC (PASSING; see anomaly above)
-- `[golden_spec_data_tree]` — §3.6, full byte-for-byte XBLOCK round-trip (PASSING)
-- `[golden_spec_slblock]` — §3.7, body + wSig + self-consistent CRC (PASSING; see anomaly above)
+**Tests that now lock the §3.x oracles in** (all PASSING):
+- `[golden_spec_header]` — §3.2, full byte-for-byte
+- `[golden_spec_nbt_leaf]` — §3.4, parse + CRC + wSig
+- `[golden_spec_bbt_leaf]` — §3.5, body + wSig + self-consistent CRC (NOTE: §3.5 still excludes byte-for-byte trailer comparison because of the misaligned BREF IBs — those WERE genuine spec-edits, separate from the CRC issue)
+- `[golden_spec_data_tree]` — §3.6, full byte-for-byte XBLOCK round-trip
+- `[golden_spec_slblock]` — §3.7, **full byte-for-byte including dwCRC + bid trailer** (upgraded post-fix)
+
+### Methodology lesson (2026-05-04, learned from this resolution)
+
+**A single positive control under one set of conditions does not rule out
+a class of bugs; it rules out a class of bugs under those specific
+conditions.**
+
+§3.6 XBLOCK happened to have `cb = totalSize - 16` with no alignment
+padding, so the buggy CRC scope `crc32(buf, trailerOff)` coincidentally
+produced the same value as the correct scope `crc32(buf, cb)`. §3.5
+BBT-leaf and §3.7 SLBLOCK had non-zero padding and exposed the bug — but
+the wrong hypothesis ("Microsoft hand-edited illustrative samples") hid
+the root cause for **6+ milestones** (M3 through M6) and shipped a
+broken writer past every internal test gate.
+
+**Lesson for future positive-control tests**:
+- Vary test conditions across positive controls. Do not rely on a single
+  spec sample as evidence that a class of behavior is correct.
+- If two methods produce matching output under condition X, but you
+  haven't tested under condition Y, you have NOT proven correctness —
+  you've proven they happen to agree under X.
+- When a test you control (§3.5/§3.7) disagrees with a test you also
+  control (§3.6), the more parsimonious explanation than "the spec is
+  wrong" is "I'm wrong, and the disagreement is the signal".
+- Self-consistency between writer and reader is NOT validation. If both
+  share the same buggy primitive, internal round-trip tests pass while
+  external compatibility fails. **Shared primitives are shared risk**;
+  every cross-validation oracle should ideally use a fully-independent
+  computation path.
+
+**Concrete debt incurred by this lesson**: M2 through M6 produced PSTs
+with wrong block dwCRCs whenever payload size wasn't naturally 64-byte
+aligned. ALL CHECKS PASSED results before commit `5c4a5c6` were
+self-consistent confirmations of a shared bug, not validation against
+external ground truth.
+
+**Application during M7-M9**: When adding new builders, watch for shared
+primitives that might propagate the same wrong assumption to writer and
+reader simultaneously. When in doubt, vary test conditions across
+positive controls. Treat any "this spec sample must be wrong" hypothesis
+as a red flag — verify the writer's own primitives first.
 
 ## M5 audit (2026-05-02, M5 closure)
 
@@ -441,6 +467,111 @@ M6 emits a 4-byte zero payload (smallest legal data block payload, DWORD-aligned
 **Risk**: real Outlook may reject the template if it strictly expects `0x3613` to be PtypBinary. Verify at M6 real-Outlook gate.
 
 **Catches it**: Outlook open / scanpst on an M6 PST. If `[m6][hierarchy_tc_3_12]` byte-equality against a real-Outlook hierarchy TC fails specifically at the TCOLDESC for 0x3613, swap propType to PtypBinary in the template and keep PtypString in per-folder TCs (one writer with a knob).
+
+## M7 — Mail content (Graph Message → IPM.Note)
+
+The 10 candidates pre-registered in M7 pre-flight (MILESTONES.md "M7
+KNOWN_UNVERIFIED candidates"). Status post-Phase-E:
+
+### M7-1 — HTML body codepage
+
+**Status: pre-registered; awaiting real-Outlook gate (gate item 10).**
+
+[SPEC §3.13] HTML dump (1638 bytes) starts with raw ASCII `<html xmlns:v=...>` — appears UTF-8, not UTF-16-LE. PidTagInternetCodepage = 20127 (US-ASCII) on that sample.
+
+M7 ships: `buildMailPc` emits raw UTF-8 bytes for `PidTagBodyHtml` (0x10130102, PtypBinary), and emits `PidTagBody_W` (0x1000001F, PtypString UTF-16-LE) as a fallback derived from `bodyPreview`.
+
+**Catches it**: Outlook open of `m7_full_pst.pst` produced by `[m7][phase_e]` tests. If body renders as garbage, switch HTML encoding (UTF-16-LE bytes) and possibly emit `PidTagInternetCodepage` (0x3FDE0003) explicitly.
+
+### M7-2 — conversationId vs conversationIndex
+
+**Status: pre-registered; awaiting real-Outlook conversation-grouping verification.**
+
+Graph emits both `conversationId` (string) and `conversationIndex` (binary). [SPEC §3.13] sample confirms `PidTagConversationIndex` is 22 structured bytes (5-byte header + 16-byte FILETIME + GUID prefix).
+
+M7 ships: emits `PidTagConversationIndex` (0x00710102, PtypBinary) from Graph's `conversationIndex` raw bytes. `PidTagConversationId` (0x30130102) NOT emitted — Graph's `conversationId` is a string-form opaque identifier.
+
+**Catches it**: Outlook conversation grouping on the M7 PST. If grouping breaks, derive `PidTagConversationId` from `PidTagConversationIndex` per [MS-OXCMSG] or emit Graph's `conversationId` directly as bytes.
+
+### M7-3 — OneOff EntryID byte format
+
+**Status: pre-registered; awaiting real-Outlook gate.**
+
+[MS-OXCDATA] §2.2.5.1 OneOff EntryID layout. M7 implementation:
+
+```
+bytes  0.. 3   rgbFlags    = 0x00000000
+bytes  4..19   ProviderUID = 81 2B 1F A4  BE A3 10 19  9D 6E 00 DD  01 0F 54 02
+bytes 20..21   Version     = 0x0000
+bytes 22..23   Flags       = 0x9001
+                              bit 0 (0x0001) MAPI_ONE_OFF_NO_RICH_INFO
+                              bit 12 (0x1000) reserved (set per backup.pst pattern)
+                              bit 15 (0x8000) MAPI_ONE_OFF_UNICODE
+bytes 24..    DisplayName  (UTF-16-LE + null terminator)
+bytes ...     AddressType  = "SMTP" (UTF-16-LE + null)
+bytes ...     EmailAddress (UTF-16-LE + null)
+```
+
+**Catches it**: Outlook open. If sender / recipient EntryIDs are rejected, compare against a backup.pst extraction structurally (don't print recipient names — only structural bytes).
+
+### M7-4 — itemAttachment encoding
+
+**Status: pre-registered; awaiting real-Outlook gate; partial implementation.**
+
+[MS-OXCMSG] §2.2.2.9 says itemAttachment is an "Embedded Message Object". M7 ships: `buildAttachmentPc` for `AttachmentKind::Item` recursively calls `buildMailPc` on the embedded message and stores the resulting HN bytes as `PidTagAttachDataBinary` (PtypBinary, tag 0x37010102), with `PidTagAttachMethod` = 5 (afEmbeddedMessage).
+
+**Limitation**: nested subnodes (large body / inner attachments of the embedded message) are dropped — only the embedded HN body crosses into the parent. Multi-level nested attachments are M10 hardening.
+
+**Catches it**: open an M7 PST with an item attachment in Outlook. Click on the embedded message — if it opens with the right subject/body, encoding is accepted. Inner attachments missing = expected M10 work.
+
+### M7-5 — itemAttachment max nesting depth
+
+**Status: tolerated.**
+
+No explicit cap enforced. Recursion depth is bounded by the Graph parse tree's depth. Combined with M7-4's "drop nested subnodes" simplification, deeply nested cases degrade gracefully.
+
+### M7-6 — PidTagMessageFlags bit composition
+
+**Status: VERIFIED via decode round-trip.**
+
+`computeMessageFlags(GraphMessage)` sets:
+- `mfRead`        (0x0001) when `isRead = true`
+- `mfUnsent`      (0x0008) when `isDraft = true`
+- `mfHasAttach`   (0x0010) when attachments present
+
+Verified by `[mail_pc_round_trip]` test: input `isRead=true + hasAttachments=true` produces inline value `0x00000011`.
+
+`mfUnmodified` (0x0002), `mfFromMe` (0x0020), `mfFAI` (0x0040), other bits: not set. M10 hardening can refine.
+
+### M7-7 — PidTagSearchKey derivation
+
+**Status: tolerated.**
+
+`graph::deriveSearchKey(smtpAddress)` produces 16 bytes: `"SMTP:" + UPPER(address)` truncated/zero-padded to 16. Deterministic; case-insensitive. Test `[m7][graph_convert] deriveSearchKey deterministic` confirms.
+
+[MS-OXOMSG] doesn't pin the exact derivation rule beyond the "SMTP:<addr>" convention; this implementation is one defensible choice.
+
+### M7-8 — RFC 2822 internet header round-trip
+
+**Status: VERIFIED via decode round-trip.**
+
+`serializeInternetHeaders` produces "Name: Value\r\n" pairs concatenated. `[mail_headers]` test confirms exact output for a 2-header sample.
+
+`buildMailPc` populates `PidTagTransportMessageHeaders` (0x007D001F, PtypString) with the UTF-16-LE encoding of this serialized text. Outlook's MIME re-roundtrip is a manual verification at gate 10.
+
+### M7-9 — Inbox NID assignment strategy
+
+**Status: tolerated.**
+
+`writeM7Pst` allocates folder NIDs dynamically via `M5Allocator::allocate(NormalFolder)`. There's no hardcoded NID for "Inbox" — Graph's `parentFolderId = "Inbox"` doesn't drive anything spec-shaped at the byte level.
+
+`PidTagIpmInboxEntryId` is NOT yet emitted at the message store PC level. If Outlook resolves "Inbox" via that property, it'll fall back to walking IPM Subtree's hierarchy. M10 hardening can add it.
+
+### M7-10 — Folder ContainerClass casing
+
+**Status: tolerated.**
+
+`M7Folder::containerClass` defaults to "IPF.Note" (mixed case). `buildMailFolderPc` test confirms emission via PidTag 0x3613001F (PtypString). Outlook tolerance to casing is gate 10.
 
 ## How to use this file
 
