@@ -1499,3 +1499,415 @@ remains the standing toolchain check until MSVC is added at M10.
   the BuildTools workload itself was not installed.
 - Suggests the manual GUI install at https://visualstudio.microsoft.com/visual-cpp-build-tools/
   will be the M10 retry path rather than another `winget --passive` attempt.
+
+---
+
+## M7 — Full mail support: pre-flight (2026-05-04)
+
+M7 lands the first real-content milestone for the Aspose.Email replacement
+deliverable: Graph Message JSON → PST IPM.Note conversion. Builds on M6's
+27-mandatory-node skeleton; populates the IPM Subtree + Inbox/Drafts/Sent
+folder hierarchy with actual mail messages, attachments, recipients, and
+headers.
+
+This pre-flight produces the M7 design artifact. Implementation does NOT
+start until Phase A is explicitly authorized.
+
+### M7 oracle inventory (URLs verified 2026-05-04)
+
+| Spec | URL | Last revision | Category |
+|---|---|---|---|
+| **[MS-OXCMSG]** Message and Attachment Object Protocol | `learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxcmsg/7fd7ec40-deec-4c06-9493-1bc06b349682` | r27.0, 2025-05-20 | Reference: per-property semantics for message + attachment objects, Recipient/Attachment table schemas, embedded message attachment encoding |
+| **[MS-OXOMSG]** Email Object Protocol | `learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxomsg/daa9120f-f325-4afb-a738-28f91049ab3c` | (re-verify at fetch) | Reference: To/Cc/Bcc semantics, internet headers, message flags, importance, follow-up flag |
+| **[MS-OXPROPS]** Master Property List | `learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxprops/f6ab1613-aefe-447d-a49c-18217230b148` | r30.0, 2025-05-20 | Reference: every PidTag's id + PropType + canonical name. Authoritative for the M7 mapping table. |
+| **[MS-OXCMAIL]** RFC2822 + MIME → Email Object | `learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxcmail/...` | (re-verify at fetch) | Reference: RFC 2822 Internet message header round-trip semantics for `PidTagTransportMessageHeaders` |
+| **[MS-OXCDATA]** Data Structures | (look up at Phase A) | — | EntryID byte format (24-byte store EntryID vs 118-byte legacy-Exchange-DN EntryID for recipients/messages) |
+| **Microsoft Graph v1.0 — message resource** | `learn.microsoft.com/en-us/graph/api/resources/message` | 2026-04-20 | Authoritative for Graph JSON schema. 32 properties + 4 relationships. |
+| **[MS-PST] §3.13** Sample Message Object | `learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/5ee9a00a-858b-47db-95b3-f91518640ea7` | 2025-02-18 | **Decode reference, NOT byte-diff.** Spec publishes the parsed/decoded content of one Outlook-produced message; raw block bytes not published. Useful as semantic cross-check (verify our M7-built IPM.Note PC carries ≥ the §3.13 sample's property set). |
+| **backup.pst** (real-Outlook, project-local) | `./backup.pst` (gitignored) | (transient) | Structural validation source. **No content extraction.** Only structural metadata: block CRCs, page CRCs, NBT/BBT walk, HN body shape, recipient table count. |
+
+### M7 oracle transcription status
+
+**No new tests/golden/spec_sample_*.bin transcriptions for M7.**
+
+Rationale:
+- §3.13 publishes the *decoded content* of a real message, not the raw
+  block bytes (no hex dump of the encrypted data block, no recipient
+  table block hex). Same structural shape as §3.10 / §3.12, which were
+  also handled as decode-reference-only oracles in M6.
+- backup.pst is the byte-rich source, but per project rule it is a
+  transient validation source — not committed as a golden fixture.
+- Transcribing a synthetic IPM.Note byte sequence to tests/golden/
+  would not represent a real-Outlook ground truth; it would be
+  self-consistency only. The CRC-scope-bug retrospective established
+  that self-consistency is not a useful safety net.
+
+CRC self-consistency check on §3.13: not applicable (no raw bytes
+published to compute CRC over). The CRC-scope fix from commit `5c4a5c6`
+is verified by the §3.7 SLBLOCK byte-for-byte test (now full block
+including dwCRC) and pst_info on backup.pst (243/243 block CRCs match).
+
+### Graph Message → PST property mapping table
+
+The authoritative M7 mapping. PidTag values per [MS-OXPROPS]; semantics
+cross-referenced against [MS-OXCMSG] / [MS-OXOMSG]; §3.13 evidence
+cited where the sample dump confirms a value choice.
+
+#### Group A — Top-level message properties (PC at message NID)
+
+| Graph field | Type | PidTag | Hex | PropType | Source | Conversion notes |
+|---|---|---|---|---|---|---|
+| (always) | — | PidTagMessageClass_W | `0x001A001F` | Unicode | [SPEC §3.13] | Hard-code "IPM.Note" UTF-16-LE for mail. M8 contacts: "IPM.Contact"; M9 calendar: "IPM.Appointment". |
+| `subject` | String | PidTagSubject_W | `0x0037001F` | Unicode | [SPEC §3.13] | UTF-16-LE bytes; null-terminated NOT required (Outlook tolerates either). Empty string allowed. |
+| `bodyPreview` | String | (omit) | — | — | [DESIGN] | Outlook computes from PidTagBody_W; do not duplicate. |
+| `body.content` (text) | String | PidTagBody_W | `0x1000001F` | Unicode | [SPEC §3.13] | UTF-16-LE. Subnode promotion if > 3580 bytes (M4 PC writer's storage rule). |
+| `body.content` (HTML) | String | PidTagBodyHtml | `0x10130102` | PtypBinary | [SPEC §3.13] | UTF-8 bytes (NOT UTF-16-LE — verify against §3.13's 1638-byte HTML dump which begins with raw ASCII `<html xmlns:v=...>`). [KNOWN_UNVERIFIED M7-1: HTML body codepage] |
+| `body.content` (HTML) → RTF | derived | PidTagRtfCompressed | `0x10090102` | PtypBinary | [DESIGN, M7 deferral] | Per [MS-OXRTFCP] §2 RTF-compression algorithm. **Skipped in M7.** Outlook reads PidTagBodyHtml directly; modern Outlook does not require PidTagRtfCompressed. M10 hardening item if a downstream consumer needs it. |
+| `importance` | enum {low,normal,high} | PidTagImportance | `0x00170003` | Int32 | [SPEC §3.13] | low=0, normal=1, high=2. §3.13 sample = 1. |
+| `isRead` | Boolean | PidTagMessageFlags | `0x0E070003` (bit) | Int32 | [SPEC §3.13] | mfRead = 0x0001. Set bit if isRead=true. §3.13: `0x21` = mfRead | mfUnmodified. |
+| `isDraft` | Boolean | PidTagMessageFlags | `0x0E070003` (bit) | Int32 | [MS-OXOMSG] | mfUnsent = 0x0008. Set if isDraft=true. |
+| `hasAttachments` | Boolean | PidTagMessageFlags | `0x0E070003` (bit) | Int32 | [MS-OXOMSG] | mfHasAttach = 0x0010. Set if attachments.length > 0. Outlook also reads PidTagHasAttachments (`0x0E1B000B`) — emit both. |
+| `categories` | String[] | PidTagKeywords | `0x301F101F` | MvUnicode | [MS-OXOMSG] | PT_MV_UNICODE; reuse M4 `encodeMvUnicode(...)` helper. |
+| `flag.flagStatus` | enum | PidTagFlagStatus | `0x10900003` | Int32 | [MS-OXOFLAG] | 0=notFlagged, 1=complete, 2=flagged. Plus PidLidFlagRequest (named property). |
+| `createdDateTime` | DateTimeOffset | PidTagCreationTime | `0x30070040` | SystemTime | [SPEC §3.13] | ISO 8601 → FILETIME (100ns ticks since 1601-01-01 UTC). Shared utility. |
+| `sentDateTime` | DateTimeOffset | PidTagClientSubmitTime | `0x00390040` | SystemTime | [SPEC §3.13] | Same conversion. |
+| `receivedDateTime` | DateTimeOffset | PidTagMessageDeliveryTime | `0x0E060040` | SystemTime | [SPEC §3.13] | Same conversion. |
+| `lastModifiedDateTime` | DateTimeOffset | PidTagLastModificationTime | `0x30080040` | SystemTime | [SPEC §3.13] | Same conversion. |
+| `internetMessageId` | String | PidTagInternetMessageId_W | `0x1035001F` | Unicode | [SPEC §3.13] | RFC 2822 Message-ID; UTF-16-LE bytes. |
+| `conversationId` | String (Graph-internal) | PidTagConversationId | `0x30130102` | Binary | [MS-OXCMSG] | Graph base64-encoded ID → bytes. (Or derive from PidTagConversationIndex.) [KNOWN_UNVERIFIED M7-2] |
+| `conversationIndex` | Edm.Binary | PidTagConversationIndex | `0x00710102` | Binary | [SPEC §3.13] | 22-byte structured value: 5-byte header + 16-byte FILETIME + 4-byte GUID prefix + child blocks. Graph already binary; pass through. §3.13 = 22 bytes. |
+| (derived) | — | PidTagSearchKey | `0x300B0102` | Binary | [SPEC §3.13] | 16-byte random GUID per message; deterministic from internetMessageId hash. |
+| (derived from `internetMessageHeaders`) | structured | PidTagTransportMessageHeaders | `0x007D001F` | Unicode | [MS-OXCMAIL] | Serialize Graph's array back to RFC 2822 text, UTF-16-LE. Optional in M7; populate when present. |
+| `inferenceClassification` | enum | PidTagInferenceClassificationType | (look up) | — | [MS-OXOMSG] | (re-verify PidTag at Phase B) |
+
+#### Group B — Sender + From (separate property sets)
+
+§3.13 distinguishes "sender" (the actual mailbox sending) from "sent representing" (the user the mail is being sent on behalf of) — most messages have these equal, but delegation scenarios differ. Map both Graph fields:
+
+| Graph field | PidTag (sender side) | Hex | Type | PidTag (representing side) | Hex |
+|---|---|---|---|---|---|
+| `sender.emailAddress.name` | PidTagSenderName_W | `0x0C1A001F` | Unicode | PidTagSentRepresentingName_W | `0x0042001F` |
+| `sender.emailAddress.address` | PidTagSenderEmailAddress_W | `0x0C1F001F` | Unicode | PidTagSentRepresentingEmailAddress_W | `0x0065001F` |
+| (derived) | PidTagSenderEntryId | `0x0C190102` | Binary | PidTagSentRepresentingEntryId | `0x00410102` |
+| (derived) | PidTagSenderAddressType_W | `0x0C1E001F` | Unicode | PidTagSentRepresentingAddressType_W | `0x0064001F` |
+| (derived) | PidTagSenderSearchKey | `0x0C1D0102` | Binary | PidTagSentRepresentingSearchKey | `0x003B0102` |
+| `from.emailAddress.name` | (= sender side; emit identical) | — | — | (= representing side; emit identical) | — |
+
+If Graph `from` differs from `sender` (delegation case), emit different
+values per side. In most cases `from == sender`.
+
+`PidTagSenderAddressType_W = "SMTP"` for Graph-sourced mail (Graph uses
+SMTP addresses). EntryID for SMTP recipients = OneOff entry ID per
+[MS-OXCDATA] §2.2.5.1 (different format from §3.13's 118-byte
+Exchange-DN EntryIDs). [KNOWN_UNVERIFIED M7-3: EntryID format choice]
+
+#### Group C — Recipient table (separate TC at message-PC's bidSub or sibling NID)
+
+§3.13 has 29-col recipient TC; M6's recipient template (NID 0x0692) has
+14 cols. M7 recipient TCs follow the larger §3.13 schema (the template
+defines the *minimum*; rows can carry more columns).
+
+Per Graph recipient: 1 row in TC. Map columns:
+
+| Graph field | PidTag | Hex | PropType | Notes |
+|---|---|---|---|---|
+| `(implicit position)` | PidTagLtpRowId | `0x67F20003` | Int32 | Sequential 1, 2, 3...; MUST be unique within table. |
+| `(version)` | PidTagLtpRowVer | `0x67F30003` | Int32 | 0 for new rows. |
+| `to/cc/bcc origin` | PidTagRecipientType | `0x0C150003` | Int32 | To=1, Cc=2, Bcc=3. |
+| `emailAddress.name` | PidTagDisplayName_W | `0x3001001F` | Unicode | UTF-16-LE. |
+| `emailAddress.address` | PidTagEmailAddress_W | `0x3003001F` | Unicode | UTF-16-LE. |
+| (derived) | PidTagAddressType_W | `0x3002001F` | Unicode | "SMTP" for Graph. |
+| `emailAddress.address` | PidTagSmtpAddress_W | `0x39FE001F` | Unicode | Same as EmailAddress for SMTP. |
+| (derived) | PidTagEntryId | `0x0FFF0102` | Binary | OneOff EntryID per [MS-OXCDATA]. |
+| (derived) | PidTagSearchKey | `0x300B0102` | Binary | "SMTP:<address>" hex bytes. |
+| (literal 0) | PidTagDisplayType | `0x39000003` | Int32 | 0 = MAILUSER. |
+| (literal 0) | PidTagRecipientFlags | `0x5FFD0003` | Int32 | 0 = no special flags. |
+| (literal 0) | PidTagResponsibility | `0x0E0F000B` | Boolean | 1 if user marked "responsible" (rare). |
+| (literal 6) | PidTagObjectType | `0x0FFE0003` | Int32 | 6 = MAPI_MAILUSER per [MS-OXCDATA]. |
+
+Plus §3.13's tracking-status fields (PidTagRecipientTrackStatus*, all
+Int32 = 0 by default for non-tracked recipients).
+
+#### Group D — Attachment table (separate TC at message-PC's bidSub or sibling NID)
+
+Per Graph attachment: 1 row in attachment TC + 1 separate Attachment PC
+node + (for fileAttachment) 1 separate data block holding the binary.
+
+Attachment TC schema follows §2.7.1's 6-column attachment template
+extended with attachment-specific properties:
+
+| PidTag | Hex | PropType | Source per attachment row |
+|---|---|---|---|
+| PidTagLtpRowId | `0x67F20003` | Int32 | Sequential. |
+| PidTagLtpRowVer | `0x67F30003` | Int32 | 0. |
+| PidTagAttachSize | `0x0E200003` | Int32 | `attachment.size` (Graph). |
+| PidTagAttachMethod | `0x37050003` | Int32 | 1 = afByValue (file), 5 = afEmbeddedMessage (item). |
+| PidTagAttachFilenameW | `0x3704001F` | Unicode | `attachment.name` UTF-16-LE. |
+| PidTagAttachLongFilename_W | `0x3707001F` | Unicode | Same as Filename for M7. |
+| PidTagDisplayName_W | `0x3001001F` | Unicode | `attachment.name` (Outlook reuses). |
+| PidTagRenderingPosition | `0x370B0003` | Int32 | -1 = no inline rendering. |
+
+Per attachment, an Attachment PC node holds the actual data via:
+
+| PidTag | Hex | PropType | For attachmentType |
+|---|---|---|---|
+| PidTagAttachDataBinary | `0x37010102` | Binary | fileAttachment: raw bytes (subnode-promoted if > 3580). |
+| PidTagAttachDataObject | `0x37010102` (same Pid, different semantic) | Binary | itemAttachment: serialized embedded message PC. |
+| PidTagAttachMimeTag_W | `0x370E001F` | Unicode | `attachment.contentType`. |
+| PidTagAttachContentId_W | `0x3712001F` | Unicode | `attachment.contentId` (inline images). |
+
+[KNOWN_UNVERIFIED M7-4: itemAttachment encoding] spec [MS-OXCMSG]
+§2.2.2.9 defines itemAttachment as an embedded message — verify exact
+serialization at Phase C (PC bytes embedded in PtypObject vs. nested
+NID with subnode chain).
+
+#### Group E — Folder containment (NBT wiring, not properties)
+
+A Graph Message has `parentFolderId`. M7 maps to a NID inside the folder
+hierarchy (extended beyond M6's IPM Subtree skeleton). Folder NIDs are
+allocated dynamically via `M5Allocator::allocate(NidType::NormalFolder)`
+when a new user folder is encountered.
+
+Each user folder's Hierarchy TC is updated when child folders are
+discovered; Contents TC is populated row-by-row as messages land.
+
+### M7 — Full mail design
+
+#### Ground rules
+
+1. **Build-from-scratch only**, M4 carryover. Existing mail is not
+   modified; the writer produces a new PST per `writeM7Pst(...)` call.
+2. **Hard-coded property catalogs** for the M7 schemas (mail PC, recipient
+   TC, attachment TC). M10 may introduce a config-driven catalog.
+3. **Shared infrastructure for M8/M9 reuse**, per project-wide context
+   update — see Decision 6 below.
+4. **Real-Outlook validation per milestone closure**: `m7_full_pst.pst`
+   gets backup.pst-style structural probe + (when Outlook access
+   available) opens-in-Outlook test. This is the M7 closure gate item;
+   substitutes for the M6 Phase E approach since the same gate now
+   applies to every milestone.
+5. **CRC-scope lesson applies**: any new shared primitive (Graph-time→
+   FILETIME, EntryID encoding, RTF compression if added later) must
+   have at least one test that exercises it via a path *different*
+   from the writer/reader pair — e.g., verify against §3.13's published
+   property values, or against a backup.pst extraction.
+
+#### Decision 1: Schema strategy — hard-coded per node-type, M7 carries the same approach as M6
+
+[DESIGN] M7 adds these new schema builders to messaging.cpp (or a new
+mail.cpp / mail.hpp pair, TBD at Phase A):
+
+- `buildMailPc(GraphMessage)` — IPM.Note PC bytes
+- `buildRecipientRow(GraphRecipient, RecipientType)` — packs one row
+- `buildRecipientTc(rows)` — 29-col TC populated with rows (extends
+  M6 buildRecipientTemplateTc by allowing rowCount > 0)
+- `buildAttachmentRow(GraphAttachment)` — packs one attachment-table row
+- `buildAttachmentTc(rows)` — 6+ col TC populated with attachment rows
+- `buildAttachmentPc(GraphAttachment)` — per-attachment PC carrying the
+  data binary or embedded message object
+- `buildFileAttachmentDataBlock(bytes)` — raw data block for
+  PidTagAttachDataBinary subnode storage
+
+#### Decision 2: HTML body handling — PidTagBodyHtml direct, RTF deferred to M10
+
+| Marker | Decision | Rationale |
+|---|---|---|
+| **[DESIGN]** | M7 emits `PidTagBodyHtml` (PtypBinary, UTF-8 bytes) for any Graph message with `body.contentType = html`. | Modern Outlook reads HTML directly; PidTagRtfCompressed is legacy. §3.13 evidence: HTML body present at 1638 bytes via PidTagBodyHtml. |
+| **[DESIGN]** | M7 emits `PidTagBody_W` (PtypString, UTF-16-LE) for plain-text bodies AND as a fallback when HTML is provided. Outlook displays the plain-text version when HTML rendering is disabled. | §3.13 evidence: BOTH PidTagBody_W (58 bytes plain-text) AND PidTagBodyHtml (1638 bytes HTML) present in the same message. |
+| **[DESIGN]** | M7 does NOT emit `PidTagRtfCompressed` (PtypBinary via [MS-OXRTFCP]). | RTF compression is a substantial implementation ([MS-OXRTFCP] is its own algorithm). M7 deliverable pressure justifies deferral. M10 hardening item if a downstream consumer requires RTF body. |
+| **[KNOWN_UNVERIFIED M7-1]** | HTML body codepage: §3.13's 1638-byte HTML dump starts with ASCII `<html xmlns:v=...>` — appears UTF-8, NOT UTF-16-LE. | Verify at Phase C: emit UTF-8 bytes. If real Outlook rejects (e.g., wants UTF-16), update via PidTagInternetCodepage (`0x3FDE0003`). §3.13 sample: PidTagInternetCodepage = 20127 (US-ASCII), so likely UTF-8 with ASCII subset. |
+
+#### Decision 3: Body storage — inline / HN / subnode
+
+Graph message bodies range from short (plain-text greeting) to large
+(multi-MB HTML with embedded images). Storage rule per [MS-PST] §2.3.3.3:
+
+| Body size (bytes) | Storage | Mechanism |
+|---|---|---|
+| ≤ 4 | Inline | (impossible for body — body is variable-size, never inline) |
+| ≤ 3580 | HN allocation | M4 PC writer auto-routes; valueBytes pointer suffices |
+| > 3580 | Subnode | Caller-supplied subnode NID; data lives in separate block(s) |
+
+For HTML > 3580 bytes (common for messages with embedded styles): the
+M4 PC writer's `PropStorageHint::Subnode` escape hatch routes the value
+to subnode storage. The caller (mail builder) is responsible for:
+1. Allocating a subnode NID (via M5Allocator).
+2. Wrapping the body bytes in a data block (or XBLOCK chain if
+   > 8176 bytes).
+3. Listing the subnode in the message PC's bidSub via SLBLOCK.
+
+**M7 single-block HN cap stays in force.** Multi-block HN is M10 work
+(per project-wide scope boundaries); for M7, message PCs that would
+require multi-block HN are a known edge case — flag and document if
+encountered.
+
+#### Decision 4: Attachment storage
+
+| Marker | Decision | Rationale |
+|---|---|---|
+| **[SPEC §3.13 + MS-OXCMSG]** | Attachments live in two structures: (a) attachment TC (one row per attachment) at sibling NID under the message folder; (b) per-attachment Attachment PC at its own NID, holding the actual `PidTagAttachDataBinary`. | Standard MAPI attachment model; §3.13 samples `<No Attachments>` so M7 cannot byte-diff §3.13 for attachments — must rely on backup.pst structural inspection at Phase E. |
+| **[DESIGN]** | File attachment: data stored as PidTagAttachDataBinary in attachment PC. Subnode-promoted if > 3580 bytes (M4 PC writer's existing rule). XBLOCK chain if > 8176 bytes. | Consistent with M4 storage rules. |
+| **[DESIGN]** | Item attachment (embedded Graph Message): the embedded message gets its own PC bytes via `buildMailPc(...)`, stored in the attachment PC's `PidTagAttachDataObject` PtypBinary slot. | Recursion: M7 builder may call itself for embedded messages. Maximum nesting depth must be capped at Phase A ([KNOWN_UNVERIFIED M7-5]). |
+| **[KNOWN_UNVERIFIED M7-4]** | itemAttachment exact byte serialization | [MS-OXCMSG] §2.2.2.9 says "Embedded Message Object". Verify at Phase C against backup.pst's embedded messages (if any) — or accept TOLERATED status if the Phase E real-Outlook gate confirms our serialization is accepted. |
+
+#### Decision 5: EntryID encoding for messaging-layer
+
+§3.13 evidence: EntryIDs in mail messages are **118 bytes** (legacy
+Exchange "EX:/O=..." DN format). M6's EntryIDs were 24 bytes (store-
+EntryID format with ProviderUID + entryNid).
+
+These are **two different EntryID kinds** per [MS-OXCDATA]:
+- Store EntryID (24 bytes): rgbFlags(4) + ProviderUID(16) + entryNid(4)
+- OneOff EntryID (variable): rgbFlags(4) + ProviderUID(16) + version+flags(4) + DisplayName + AddressType + EmailAddress (UTF-16-LE strings)
+- Exchange-DN EntryID (118 bytes for §3.13 sample): legacy format with
+  fixed ProviderUID + DN string (`/O=MICROSOFT/OU=...`).
+
+Graph-sourced messages have SMTP addresses, not Exchange DNs. So M7
+generates **OneOff EntryIDs** for sender/recipient/etc. EntryID slots,
+not Exchange-DN-style EntryIDs. The 118-byte §3.13 sample is from a
+mailbox-internal flow; Graph users access via SMTP.
+
+[KNOWN_UNVERIFIED M7-3] OneOff EntryID byte-format details — fetch
+[MS-OXCDATA] §2.2.5.1 at Phase A; pin exact `rgbFlags` semantics
+("delivery message" flag, "unicode names" flag), DisplayName/AddressType/
+EmailAddress null-termination, alignment.
+
+#### Decision 6: Shared infrastructure for M8/M9 reuse
+
+[DESIGN] Per project-wide context update, M7 builders generic over
+"thing-being-converted" so M8 contacts and M9 calendar reuse them:
+
+| Builder | Generic | M7 use | M8 use | M9 use |
+|---|---|---|---|---|
+| `buildRecipientRow(...)` | Yes | mail recipients (To/Cc/Bcc) | (n/a) | meeting attendees |
+| `buildRecipientTc(rows)` | Yes | message-attached recipient table | (n/a) | event-attached recipient table |
+| `buildAttachmentRow(...)` | Yes | mail attachments | contact photo (1 row) | meeting attachments |
+| `buildAttachmentTc(rows)` | Yes | mail attachment table | contact (1-row TC) | meeting attachment TC |
+| `buildAttachmentPc(...)` | Yes | per-mail-attachment PC | contact-photo PC | per-meeting-attachment PC |
+| `buildFolderPc(...)` | Already generic (M6 carryover); M7 extends with new folder schemas | Inbox, Drafts, Sent, etc. | Contacts folder (different default DisplayName, ContainerClass = "IPF.Contact") | Calendar folder (ContainerClass = "IPF.Appointment") |
+
+[DESIGN] **PidTagContainerClass** at folder PC distinguishes folder types:
+- "IPF.Note" — mail folder (M7)
+- "IPF.Contact" — contacts folder (M8)
+- "IPF.Appointment" — calendar folder (M9)
+- "IPF.Task", etc. — out of scope
+
+`buildFolderPc` accepts a new `containerClass` parameter (defaulting to
+empty for M6's spam/IPM/Finder/DeletedItems use). M7 passes "IPF.Note"
+for new mail folders.
+
+#### Decision 7: Folder hierarchy beyond IPM Subtree skeleton
+
+M6 emitted only the §2.7.1 mandatory folders (Root + IPM Subtree +
+Finder + Deleted Items + Spam Search). M7 populates IPM Subtree's
+Hierarchy TC with actual user folders.
+
+[DESIGN] M7 creates these standard mail folders under IPM Subtree:
+- **Inbox** (NID dynamically allocated, NormalFolder type) — Graph's
+  `Inbox` well-known folder
+- **Drafts** — Graph's `Drafts`
+- **Sent Items** — Graph's `SentItems`
+- **Outbox** — Graph's `Outbox` (typically empty in archived PSTs)
+
+For Graph's `parentFolderId` referencing user-created folders, M7
+recursively descends and creates folder PCs as needed.
+
+Each new folder gets:
+- 1 PC node (NormalFolder) with Display + ContentCount + Subfolders + ContainerClass="IPF.Note"
+- 3 sibling tables (Hierarchy + Contents + FAI Contents) at shared-nidIndex / nidType ∈ {0x0D, 0x0E, 0x0F}
+
+This pattern was M6's folder layout (`writeM6Pst`); M7 extends to
+dynamic-tree-of-folders.
+
+#### Decision 8: Graph-JSON conversion utilities (shared across M7-M9)
+
+[DESIGN] New module: `include/pstwriter/graph_convert.hpp` +
+`src/graph_convert.cpp`. Contains:
+
+- `vector<uint8_t> utf8ToUtf16le(string_view s)` — used everywhere
+  Graph strings cross to PST `PtypString` slots
+- `array<uint8_t, 8> isoToFiletime(string_view iso8601)` — Graph times
+  → 8-byte FILETIME (100ns ticks since 1601-01-01 UTC)
+- `vector<uint8_t> base64DecodeBinary(string_view b64)` — Graph base64
+  fields (conversationIndex, attachment.contentBytes) → bytes
+- `vector<uint8_t> makeOneOffEntryId(string_view name, string_view smtp,
+  array<uint8_t, 16> providerUid)` — generic OneOff EntryID encoder
+  per [MS-OXCDATA] §2.2.5.1 (verify at Phase A)
+- `array<uint8_t, 16> deriveSearchKey(string_view smtpAddress)` —
+  16-byte search key from "SMTP:<addr>"
+
+Each utility has a dedicated test file in tests/ (test_graph_convert.cpp).
+Tests use known-good inputs from §3.13 evidence (e.g., the 22-byte
+ConversationIndex sample) AND backup.pst extractions (where applicable
+without content extraction — e.g., FILETIME values from BBT page
+headers, EntryID structures observed without printing display names).
+
+### M7 exit gate
+
+| Item | Description | Mechanism |
+|---|---|---|
+| 1 | Graph Message JSON parsing layer with all 32+ Graph fields | Phase A; test_graph_message_parser.cpp |
+| 2 | Plain-text mail message round-trip | Phase B; test_mail_pc_round_trip.cpp |
+| 3 | HTML mail message with PidTagBodyHtml | Phase C; test_mail_html.cpp |
+| 4 | File attachment (binary data + attachment table populated) | Phase C; test_mail_file_attachment.cpp |
+| 5 | Item attachment (embedded message) | Phase C; test_mail_item_attachment.cpp |
+| 6 | Multi-recipient (To/Cc/Bcc populated independently) | Phase D; test_mail_recipients.cpp |
+| 7 | Internet headers preserved (PidTagTransportMessageHeaders) | Phase D; test_mail_headers.cpp |
+| 8 | Folder hierarchy: at least 2 user folders under IPM Subtree | Phase D; test_mail_folder_tree.cpp |
+| 9 | pst_info reports zero orphan blocks on M7 PST | Phase E; same as M6 gate |
+| 10 | M7 PST opens cleanly in Outlook (defer if Outlook unavailable) | Phase E; manual or scripted |
+| 11 | M6 reader walks M7 PST without breaking (additive contract) | Phase E; ctest existing M6 reader tests on M7 PST input |
+| 12 | backup.pst-style structural validation: no CRC mismatches, valid HN bodies, all NBT entries reachable | Phase E; pst_info + custom probe |
+
+### M7 phasing plan
+
+5 phases (mirrors M5/M6 structure):
+
+| Phase | Scope | Output | Exit |
+|---|---|---|---|
+| **A** | Pre-flight (this artifact) + Graph JSON parsing | Phase A design doc complete + `parseGraphMessage(json) → GraphMessage` struct + tests | All Group A/B/C/D field types parse cleanly from realistic JSON; no PST output yet |
+| **B** | Plain-text mail builder | `buildMailPc(GraphMessage)` for `body.contentType = text`; recipient TC for single-recipient; minimum-viable IPM.Note | `[m7][mail_pc_round_trip]` test passes: Graph JSON → PC bytes → readPropertyContext → all top-level Group A properties decode back |
+| **C** | HTML body + attachments | PidTagBodyHtml support, file attachment encoding, item attachment encoding | `[m7][mail_html]`, `[m7][mail_file_attachment]`, `[m7][mail_item_attachment]` all pass |
+| **D** | Multi-recipient, headers, folder hierarchy | recipient TC with 2+ rows in Group C; PidTagTransportMessageHeaders; user-folder tree under IPM Subtree | `[m7][mail_recipients]`, `[m7][mail_headers]`, `[m7][mail_folder_tree]` all pass |
+| **E** | End-to-end + validation gate | `writeM7Pst(GraphMessage[], folderTree)` produces `m7_full_pst.pst`; pst_info ALL CHECKS PASSED; backup.pst-style probe; Outlook gate (deferred if blocked) | `[m7][end_to_end][m7_gate]`; closure of M7 milestone |
+
+Each phase stops for review before the next (per-phase commits resume).
+
+### M7 KNOWN_UNVERIFIED candidates (pre-registered)
+
+These get registered in KNOWN_UNVERIFIED.md at Phase A code time, BEFORE
+contradiction. M3 KNOWN_UNVERIFIED §3.5/§3.7 hand-edited-spec hypothesis
+was wrong because we hadn't pre-registered with sufficient skepticism;
+M7 entries are explicit at-pre-flight to avoid that pattern.
+
+| ID | Topic | Pre-registered hypothesis | Confirmation gate |
+|---|---|---|---|
+| **M7-1** | HTML body codepage | UTF-8 bytes (ASCII subset for §3.13's HTML). PidTagInternetCodepage=20127 (US-ASCII) controls. Modern Outlook should accept UTF-8 directly. | Phase E real-Outlook gate: open M7 PST with HTML message; verify body renders correctly. If Outlook expects UTF-16-LE in PidTagBodyHtml's binary slot, switch encoding. |
+| **M7-2** | conversationId vs conversationIndex relationship | Graph `conversationId` ≠ PidTagConversationId at byte level. PidTagConversationIndex (§3.13's 22 bytes) is the authoritative threading anchor. M7 emits PidTagConversationIndex from Graph's `conversationIndex`; PidTagConversationId derived (or omitted). | Verify at Phase B that Outlook's conversation grouping works on M7 messages — if grouping fails, PidTagConversationId is required and must be encoded specifically. |
+| **M7-3** | OneOff EntryID byte format | rgbFlags(4) + 0xC150B7D3-AB54-1018-C0CB-D8E45C4E07A8 ProviderUID(16) per [MS-OXCDATA] OneOff GUID + version+flags(4) + DisplayName(UTF-16-LE+null) + AddressType(UTF-16-LE+null) + EmailAddress(UTF-16-LE+null). | Phase A: fetch [MS-OXCDATA] §2.2.5.1; verify exact byte layout. Phase E: backup.pst extraction confirms (without printing recipient names; only structural shape). |
+| **M7-4** | itemAttachment embedded message encoding | Per [MS-OXCMSG] §2.2.2.9: PidTagAttachDataObject contains the embedded message PC's HN bytes. Subnodes of the embedded message are subnodes of the attachment PC. | Phase C: round-trip test (Graph item attachment → PST → readPropertyContext → expected fields). Phase E: backup.pst structural confirmation if embedded messages exist in sample. |
+| **M7-5** | itemAttachment maximum nesting depth | M7 caps at 3 levels (a message attached to an attached message attached to an attached message). Beyond is rare; any deeper triggers a "convert to fileAttachment" fallback. | Phase A authorization to set the cap; Phase C test for the 3-level case + the cap-exceeded fallback. |
+| **M7-6** | PidTagMessageFlags bit composition | mfRead=0x01, mfUnsent=0x08, mfHasAttach=0x10, mfFromMe=0x20, mfFAI=0x40, mfNotifyRead=0x100, mfNotifyUnread=0x200, mfInternet=0x2000. M7 sets bits per Graph field semantics. | Phase B: emit; verify Graph→bits round-trip. §3.13 sample: 0x21 = mfRead | mfUnmodified (mfUnmodified=0x02). |
+| **M7-7** | PidTagSearchKey derivation | 16-byte value derived from "SMTP:<address>" hash (or just the bytes "SMTP:<address>" right-padded/truncated to 16 bytes per [MS-OXOMSG]). | Phase A: pin exact derivation rule; cross-check against backup.pst search keys (structural only — confirm 16 bytes and reasonable distribution; no content). |
+| **M7-8** | RFC 2822 internet header round-trip | Graph's `internetMessageHeaders` is a structured array of `{name, value}`; PidTagTransportMessageHeaders is a single PtypString containing the full RFC 2822 header block. M7 serializes Graph back to text with CRLF line endings. | Phase D: round-trip test (Graph headers → PST → headers re-parsed → matches Graph). [MS-OXCMAIL] §2.2.3 may pin the serialization format. |
+| **M7-9** | Inbox NID assignment strategy | Inbox is a well-known folder; Graph references it as `parentFolderId = "Inbox"`. M7 assigns Inbox NID dynamically via M5Allocator (no fixed NID for Inbox per [MS-PST] §2.4.x reserved NIDs). PidTagIpmInboxEntryId in message store points to the chosen NID. | Phase D: verify Outlook resolves Inbox via PidTagIpmInboxEntryId (if absent, look for [MS-OXOSFLD] which lists "well-known folder" property tags). |
+| **M7-10** | Folder ContainerClass casing | "IPF.Note" all-caps suffix? Or "IPF.Note" with lowercase "Note"? §3.12 shows `0x3613001F PidTagContainerClass_W` but value not pinned in our samples. | Phase A: re-verify against backup.pst structural extraction (find container class strings without printing folder names — just the class string). |
+
+### M7 risks
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| Outlook rejects M7 PST despite our internal validation | High | Real-Outlook gate is Phase E; if blocked by no-Outlook environment, validate against backup.pst structurally and ship with that as the safety net. |
+| Aspose.Email replacement deadline pressure → quality compromise | Medium | M7 phasing keeps each phase's scope tight; per-phase commits + tests prevent late-stage scope creep. |
+| Multi-block HN required for large message bodies (out of scope) | Medium | Document edge case; cap M7 message body at 8176 bytes (single-block HN); flag larger as M10 work. |
+| EntryID encoding (M7-3) gets the byte layout wrong | Medium | Pre-register as KNOWN_UNVERIFIED M7-3; verify at Phase A from [MS-OXCDATA]; backup.pst structural cross-check at Phase E. |
+| HTML body codepage mismatch (M7-1) | Low | Pre-registered; failure mode is "Outlook displays HTML wrong" — recoverable by rebuilding with corrected codepage. |
+| MSVC `/W4 /WX` cleanup missing → engineer using MSVC encounters warnings | Low (tracked) | Documented deferral to M10; per-milestone real-Outlook gate is the stronger safety net for the bug class M7 is most exposed to. |
+
+### M7 toolchain debt
+
+Same items as M6 pre-flight, all deferred:
+- MSVC `/W4 /WX` clean build — deferred to M10 (sixth deferral, documented)
+- MinGW upgrade (g++ 6.3 → modern) — deferred to M10
+
+No new toolchain debt introduced by M7.
