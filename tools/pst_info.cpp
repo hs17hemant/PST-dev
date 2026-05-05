@@ -29,6 +29,7 @@
 #include <cstring>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -367,6 +368,22 @@ void checkPageTrailer(const uint8_t* page, uint64_t ibPage,
                       "%s page CRC mismatch (stored=0x%08X, computed=0x%08X)",
                       label.c_str(), dwCRC, recomputed);
         log.fail(msg);
+    }
+
+    // Per [MS-PST] §2.2.2.7.2 + §2.6.1, AMap (ptype 0x84) and PMap (ptype
+    // 0x83) pages MUST carry PAGETRAILER.bid == page file offset (ib).
+    // Real Outlook walks Read(@ib) and rejects mismatches as
+    // "Outlook Data File Corruption". See KNOWN_UNVERIFIED.md M11-E.
+    if (ptype == ptype::kAMap || ptype == ptype::kPMap) {
+        if (bid == ibPage) {
+            log.pass(label + " trailer.bid == ib (M11-E invariant)");
+        } else {
+            std::ostringstream msg;
+            msg << label << " trailer.bid=0x" << std::hex << std::uppercase
+                << bid << " but ib=0x" << ibPage
+                << " (M11-E: AMap/PMap must store ib in trailer.bid)";
+            log.fail(msg.str());
+        }
     }
 }
 

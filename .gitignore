@@ -29,3 +29,4 @@ Testing/
 
 # --- Local debug scratch (probes, throwaway PSTs, ad-hoc binaries) ---
 .tmp/
+# CLAUDE.md

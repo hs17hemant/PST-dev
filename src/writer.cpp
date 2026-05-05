@@ -77,7 +77,8 @@ FILE* openWb(const string& path) noexcept
 // ===========================================================================
 WriteResult writeEmptyPst(const string& path) noexcept
 {
-    const Bid bidAMap = Bid::makeInternal(1ull); // 0x07
+    // AMap occupies internal bid index 1 in the M2 reservation table, but
+    // its PAGETRAILER.bid is set from its ib by buildAMap (M11-E).
     const Bid bidNbt  = Bid::makeInternal(2ull); // 0x0B
     const Bid bidBbt  = Bid::makeInternal(3ull); // 0x0F
     const Bid bidNextP{Bid::makeInternal(4ull)}; // 0x13
@@ -97,7 +98,7 @@ WriteResult writeEmptyPst(const string& path) noexcept
     populateFreshRgnid(state);
 
     const auto header = serializeHeader(state);
-    const auto amap   = buildAMap(bidAMap, Ib{kIbAMap}, kIbEof);
+    const auto amap   = buildAMap(Ib{kIbAMap}, kIbEof);
     const auto nbt    = buildEmptyNbtLeaf(bidNbt, Ib{kIbNbt});
     const auto bbt    = buildEmptyBbtLeaf(bidBbt, Ib{kIbBbt});
 
@@ -264,8 +265,8 @@ WriteResult buildAndWriteBlocksPst(const string&                    path,
     const auto nbtPage = buildEmptyNbtLeaf(bidNbtLeaf, Ib{L.nbtLeafIb});
 
     // 8. AMap: covers [0..ibFileEof) — every 64-byte unit is "allocated".
-    const Bid bidAMap = Bid::makeInternal(1ull); // 0x07
-    const auto amap   = buildAMap(bidAMap, Ib{kIbAMap}, L.ibFileEof);
+    // PAGETRAILER.bid set from ib by buildAMap (M11-E).
+    const auto amap   = buildAMap(Ib{kIbAMap}, L.ibFileEof);
 
     // 9. HEADER.
     WriterState state{};
@@ -654,8 +655,8 @@ WriteResult writeM5Pst(const string&                  path,
     }
 
     // ---- 5. AMap + HEADER ------------------------------------------------
-    const Bid bidAMap = Bid::makeInternal(1ull); // 0x07
-    const auto amap   = buildAMap(bidAMap, Ib{kIbAMap}, ibFileEof);
+    // PAGETRAILER.bid set from ib by buildAMap (M11-E).
+    const auto amap   = buildAMap(Ib{kIbAMap}, ibFileEof);
 
     WriterState state{};
     state.dwUnique         = 1u;
