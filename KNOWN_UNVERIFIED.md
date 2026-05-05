@@ -750,6 +750,212 @@ User to re-run scanpst.exe on `m11k_mail.pst`. Expected:
 If real Outlook opens cleanly without the corruption dialog, M10
 mail-only ship gate is achieved.
 
+### M11-L — Tier 6: NID 0x610 TCINFO regression revert + RFT row content fix
+
+**Status: STRUCTURAL FIXES VERIFIED via pst_info. Semantic scanpst verdict pending user run.**
+
+The Tier 5 (M11-K) commit introduced a structural regression and
+left the Receive Folder Table semantically broken. Tier 6 reverts
+the bad bits and applies the discipline rule: **verify every fix via
+pst_info BEFORE handing off**, no more cascade-deferral excuses.
+
+#### P1 — NID 0x610 TCINFO ordering regression (M11-K bug)
+
+scanpst on `m11k_mail.pst`:
+```
+!!TCINFO (nid=610) invalid TCI_1b (75, TCI_2b=84)
+!!TC (nid=610) missing required column (...)  × 17
+```
+
+`m11k_mail.pst` pst_info dump showed `rgib={0x0054, 0x0054, 0x004B, 0x004E}`
+— TCI_4b=84, TCI_2b=84, TCI_1b=75, TCI_bm=78. Violates [MS-PST]
+§2.3.4.1 invariant `TCI_4b ≤ TCI_2b ≤ TCI_1b ≤ TCI_bm`. Once the
+TCINFO fails to parse, scanpst can't read the column descriptors and
+reports all 17 required columns as missing.
+
+**Root cause**: M11-K's dedicated 20-col `kSearchContentsCols`
+schema placed the 8-byte SystemTime `0x3008 LastModTime` at
+ibData=76, but the 1-byte Boolean cells at ibData=72/73/74 had
+already started the 1-byte region. Per spec, all 4-byte/8-byte
+cells must occupy the contiguous prefix of the row, then 1-byte
+cells, then CEB. Mixing them produces end4b > end1b.
+
+**Fix**: revert to the simpler "Contents schema + 3" approach the
+Tier 4 prompt originally specified. New 31-col
+[`kSearchContentsCols`](src/messaging.cpp):
+- All 28 cols of `kContentsCols` at their existing offsets
+- New 4-byte cells: `0x67F1 PR_PF_PROXY` at ibData=120, `0x0E05
+  PR_PARENT_ENTRYID_W` at ibData=124
+- Booleans `0x0057 MessageToMe` and `0x0058 MessageCcMe` shift
+  from ibData=120/121 to 128/129
+- New 1-byte cell: `0x0E2A PR_HASATTACH` at ibData=130
+- CEB region 122 → 131 (4 bytes for 31 iBits)
+- endBm: 126 → 135
+
+**Verification (mandatory pre-handoff per discipline rule)**:
+```
+TC cCols=31 rgib={0x0080, 0x0080, 0x0083, 0x0087}
+```
+TCI_4b=128, TCI_2b=128, TCI_1b=131, TCI_bm=135 → 128 ≤ 128 ≤ 131 ≤
+135 ✓ monotonic, satisfies the [MS-PST] §2.3.4.1 invariant.
+
+#### P2 — Receive Folder Table row content (4th attempt)
+
+History on this issue:
+- **M11-I G**: shipped NID 0x617 with placeholder schema → still flagged
+- **M11-J P5**: claimed cascade → wrong, was real
+- **M11-K P3**: correct schema (5-col with `PR_RECEIVE_FOLDER_ID` ENTRYID) → still flagged
+- **M11-L P2**: row CONTENT was the issue, not schema
+
+`pst_info` on `m11k_mail.pst` showed NID 0x617 IS in the NBT
+(bidData=0x1C) with valid TCINFO `cCols=5 rgib={0x18, 0x18, 0x18, 0x19}`.
+The structural pieces are correct. scanpst still rejected it.
+
+**Root cause**: the M11-K row had `LtpRowId=1` and emitted
+`MessageClass = ""` (size=0). M11-K P5 had documented that 0-byte
+HN allocations leave `HID=0` in the row cell, which downstream
+parsers treat as "column missing" — exactly the same mistake
+applied to RFT row content rather than NameId map values.
+
+**Fix** ([`buildReceiveFolderTableTc`](src/messaging.cpp)):
+- `LtpRowId = 0` (the conventional "default class" key — Outlook
+  hashes the empty class to 0 when looking up the receive folder
+  for messages with unknown class)
+- `MessageClass`: 2-byte UTF-16-LE NUL char (one `0x0000`) — same
+  cure as M11-K P5: non-empty payload so the HID slot resolves to
+  a real allocation, while semantically still "the empty class"
+- `ReceiveFolderID`: 24-byte ENTRYID for IPM Subtree
+  (NID 0x8022) — unchanged from M11-K P3
+- CEB byte 0xF0 (iBits 0-3 set; iBit 4 LastModTime clear)
+
+**Verification (mandatory pre-handoff)**:
+```
+NID 0x617 in NBT: True
+TC cCols=5 rgib={0x0018, 0x0018, 0x0018, 0x0019}
+```
+24 ≤ 24 ≤ 24 ≤ 25 ✓ monotonic. NID present. TCINFO valid.
+
+**Honest disclaimer**: I cannot run scanpst headless to confirm the
+RFT semantic acceptance. P2 may need yet another iteration if
+scanpst's "missing default message class" check uses a different
+LtpRowId convention or expects MessageClass at zero length via a
+different encoding (e.g., HID=0 with CEB-clear meaning "true empty
+string"). User feedback required.
+
+#### P3 — Cascade row mismatches (deferred per Tier 6 prompt)
+
+Original log:
+```
+!!Contents Table for 8002, row doesn't match sub-object: irow=0, RowID=8004
+!!Contents Table for 8002, row doesn't match sub-object: irow=1, RowID=8024
+!!Hierarchy Table for 8022, row doesn't match sub-object: irow=0, RowID=8002
+```
+
+Per the user's prompt, hold P3 pending the next scanpst run after
+P1+P2 land — these may resolve as cascade. If they persist on the
+next log, separate Tier 7 investigation.
+
+**Verification**: full test suite 233/233 passing, 5650 assertions.
+pst_info ALL CHECKS PASSED on all three regenerated PSTs:
+- `m11l_mail.pst` (34 HN blocks, 11 PC + 23 TC)
+- `m11l_contacts.pst` (30 HN blocks, 10 PC + 20 TC)
+- `m11l_cal.pst` (30 HN blocks, 10 PC + 20 TC)
+
+User to re-run scanpst.exe + open in real Outlook on
+`m11l_mail.pst`. Expected from this commit:
+- "TCINFO (nid=610) invalid TCI_1b" → 0 (P1)
+- "TC (nid=610) missing required column" → 0 (P1)
+- "Receive folder table missing" → 0 if P2 row content is right;
+  may persist if scanpst expects different LtpRowId/MessageClass
+  encoding (will need Tier 7).
+
+### M11-M — Tier 8: TC row CEB-vs-PC parity (the actual Outlook open blocker)
+
+**Status: STRUCTURAL FIXES VERIFIED via diagnostic decoder. Real-Outlook open verdict pending user.**
+
+User-driven bisection (m11m_simple = 1 msg no attachment, m11m_norft =
+same + no RFT) confirmed **neither attachment nor RFT was the
+real-Outlook open blocker**. The remaining `!!` errors in both logs
+were the same:
+
+```
+!!Contents Table for 8002, row doesn't match sub-object: irow = 0, RowID = 8004
+!!Hierarchy Table for 8022, row doesn't match sub-object: irow = 0, RowID = 8002
+```
+
+That meant the row-vs-sub-object mismatch was the actual blocker, not
+the noise we'd been chasing.
+
+**Diagnostic methodology**: rather than speculate, wrote a Python
+decoder (`.tmp/diff_tc_pc.py`) that walks the encrypted PST, decrypts
+each block, parses the TC HN at one NID and the PC HN at another, and
+prints a side-by-side comparison of every TC column value vs the
+corresponding PC property. For `m11m_simple.pst`:
+
+```
+Bisection #1: Inbox Contents Table 0x800E row 0  vs  Message PC 0x8004
+  tag=0x0E17(0003) iBit=2  CEB=True  -- PC has no 0x0E17     ← MISMATCH
+  tag=0x0036(0003) iBit=15 CEB=True  -- PC has no 0x0036     ← MISMATCH
+  tag=0x0057(000B) iBit=13 CEB=True  -- PC has no 0x0057     ← MISMATCH
+  tag=0x0058(000B) iBit=14 CEB=True  -- PC has no 0x0058     ← MISMATCH
+
+Bisection #2: IPM Subtree Hierarchy 0x802D row 0  vs  Folder PC 0x8002
+  tag=0x0E33(0014) iBit=7  CEB=True  -- PC has no 0x0E33     ← MISMATCH
+  tag=0x3613(001F) iBit=10 CEB=False -- row=00000000  pc=4900500046002e004e006f0074006500   ← MISMATCH (row hides "IPF.Note")
+```
+
+**Root cause**: dual-derivation drift. TC rows derived from Graph
+JSON in `messaging.cpp` set CEB-bits unconditionally (status,
+sensitivity, MessageToMe/CcMe, ReplChangenum) regardless of whether
+`buildMailPc` / `buildMailFolderPc` actually emit the corresponding
+PC property. And vice-versa for ContainerClass — the folder PC
+emitted "IPF.Note" but the hier row CEB-cleared the column. scanpst
+strict mode flags any (row CEB=True, PC absent) or (row CEB=False,
+PC has non-default value) as "row doesn't match sub-object".
+
+**Fixes applied**:
+
+1. **Contents TC row** ([src/messaging.cpp `buildFolderContentsTc`](src/messaging.cpp)):
+   - `0x0E17` (PR_MESSAGE_STATUS): CEB only when value != 0
+   - `0x0036` (PR_SENSITIVITY): CEB only when value != 0
+   - `0x0057` (PR_MESSAGE_TO_ME): CEB only when value == true
+   - `0x0058` (PR_MESSAGE_CC_ME): CEB only when value == true
+   - Other unconditional bits (LtpRowId/Ver, MessageFlags, Importance,
+     MessageSize) preserved — `buildMailPc` always emits these
+
+2. **Hierarchy TC row** ([src/messaging.cpp `buildFolderHierarchyTc`](src/messaging.cpp)):
+   - Replaced static `kHierarchyCebByte0=0xFD / Byte1=0x00` with
+     dynamic per-row CEB construction
+   - Dropped `iBit 7` (PR_CHANGENUM) — folder PC doesn't emit 0x0E33
+   - Added `iBit 10` (PR_CONTAINER_CLASS) populated from
+     `HierarchyTcRow::containerClassUtf16le` when set
+
+3. **HierarchyTcRow struct extended** ([include/pstwriter/messaging.hpp](include/pstwriter/messaging.hpp)):
+   - New `containerClassUtf16le / containerClassSize` fields. When set,
+     the row emits `0x3613` as a varlen HID matching the child
+     folder's PC value.
+
+4. **mail.cpp plumbing** ([src/mail.cpp](src/mail.cpp) IPM Subtree
+   hierarchy build): folderNameStore already stored the
+   container-class buffer at index `2*i+1`; pass it through to the
+   new `HierarchyTcRow.containerClassUtf16le` field.
+
+**Verification (mandatory pre-handoff per discipline rule)**:
+
+```
+$ python .tmp/diff_tc_pc.py .tmp/m11n_simple.pst
+Bisection #1: 0x800E row 0 vs 0x8004 — every column [MATCH] or symmetric-absent
+Bisection #2: 0x802D row 0 vs 0x8002 —
+  tag=0x0E33 iBit=7  CEB=False (was True)         ✓ symmetric-absent
+  tag=0x3613 iBit=10 CEB=True row="IPF.Note" pc="IPF.Note"  ✓ MATCH
+```
+
+ZERO MISMATCH lines. Test suite 233/233. pst_info ALL CHECKS PASSED.
+
+**Diagnostic artifact preserved**: [.tmp/diff_tc_pc.py](.tmp/diff_tc_pc.py)
+remains in the tree as a regression-prevention tool. Run it after any
+TC row builder change to verify CEB-vs-PC parity stays aligned.
+
 ### M11-F — Show-stoppers from external code review (TC overflow / XBLOCK chaining / buffer aliasing / RowVer)
 
 **Status: FIXED (4 of 21 review items). 17 remaining items deferred to M10+.**

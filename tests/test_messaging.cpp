@@ -477,10 +477,22 @@ TEST_CASE("buildFolderHierarchyTc produces a Sec 3.12-shaped 13-col Hierarchy TC
         const uint16_t mtxOff = detail::readU16(hn, ibHnpm + 4 + 2 * 3); // slot 3
 
         // Each row is 55 bytes. Bytes 53..54 = CEB.
+        // M11-M (Tier 8): CEB now built dynamically based on actual values
+        // present, no longer the static §3.12 sample's 0xFD/0x00 pattern:
+        //   iBit 0  LtpRowId           always
+        //   iBit 1  LtpRowVer          always
+        //   iBit 2  DisplayName        when src.displayNameSize > 0
+        //   iBit 3  ContentCount       always
+        //   iBit 4  ContentUnreadCount always
+        //   iBit 5  Subfolders         always
+        //   iBit 7  ReplChangenum      DROPPED (folder PC doesn't emit 0x0E33)
+        //   iBit 10 ContainerClass     when src.containerClassSize > 0
+        // For these baseline rows: displayName set, containerClass NOT set
+        // → byte 0 = 0b11111100 = 0xFC, byte 1 = 0x00.
         for (size_t r = 0; r < 3; ++r) {
             const size_t rowStart = mtxOff + r * 55u;
-            REQUIRE(hn[rowStart + 53] == 0xFDu);   // iBit 0..7: bits 0,1,2,3,4,5,7 set
-            REQUIRE(hn[rowStart + 54] == 0x00u);   // iBit 8..12 all clear
+            REQUIRE(hn[rowStart + 53] == 0xFCu);   // iBits 0,1,2,3,4,5
+            REQUIRE(hn[rowStart + 54] == 0x00u);   // (iBit 10 clear → no ContainerClass)
         }
 
         // Row 0 (sorted: 0x2223 first) should have rowId 0x2223 in bytes 0..3.
@@ -841,7 +853,7 @@ TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
     REQUIRE(hn[3] == 0x7Cu);
     const uint16_t ibHnpm = detail::readU16(hn, 0);
     const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
-    REQUIRE(hn[tciOff + 1] == 0x14u);   // cCols = 20 (M11-K P4: dedicated Search Contents schema)
+    REQUIRE(hn[tciOff + 1] == 0x1Fu);   // cCols = 31 (M11-L P1: Contents 28 + 3 search-specific)
     REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);
 }
 
