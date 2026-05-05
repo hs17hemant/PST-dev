@@ -978,13 +978,30 @@ TEST_CASE("writeM6Pst assembles all 27 Sec 2.7.1 nodes; pst_info passes",
         REQUIRE(findParent(0x8042u) == 0x0122u);   // Finder
         // Deleted Items → IPM Subtree
         REQUIRE(findParent(0x8062u) == 0x8022u);
-        // Sibling tables, templates, bare nodes, message store, NameToIdMap → 0
-        REQUIRE(findParent(0x0021u) == 0u);
-        REQUIRE(findParent(0x0061u) == 0u);
-        REQUIRE(findParent(0x012Du) == 0u);
-        REQUIRE(findParent(0x01E1u) == 0u);
-        REQUIRE(findParent(0x060Du) == 0u);
-        REQUIRE(findParent(0x0671u) == 0u);
+        // Per-folder sibling tables (HIER/CONTENTS/FAI) → owning folder
+        // [M11-D: corrected from §3.12 "Parent NID 0" to real-Outlook
+        // oracle "owning folder NID"; readers walk this field for the
+        // folder→table relationship.]
+        REQUIRE(findParent(0x012Du) == 0x0122u);   // Root's HIER
+        REQUIRE(findParent(0x012Eu) == 0x0122u);   // Root's CONTENTS
+        REQUIRE(findParent(0x012Fu) == 0x0122u);   // Root's FAI
+        REQUIRE(findParent(0x802Du) == 0x8022u);   // IPM Subtree's HIER
+        REQUIRE(findParent(0x802Eu) == 0x8022u);   // IPM Subtree's CONTENTS
+        REQUIRE(findParent(0x802Fu) == 0x8022u);   // IPM Subtree's FAI
+        REQUIRE(findParent(0x804Du) == 0x8042u);   // Finder's HIER
+        REQUIRE(findParent(0x804Eu) == 0x8042u);   // Finder's CONTENTS
+        REQUIRE(findParent(0x804Fu) == 0x8042u);   // Finder's FAI
+        REQUIRE(findParent(0x806Du) == 0x8062u);   // Deleted Items' HIER
+        REQUIRE(findParent(0x806Eu) == 0x8062u);   // Deleted Items' CONTENTS
+        REQUIRE(findParent(0x806Fu) == 0x8062u);   // Deleted Items' FAI
+        // Templates / bare nodes / message store / NameToIdMap → 0
+        // (templates aren't owned by any folder; bare nodes have no parent
+        //  in the §2.7.1 mandatory set.)
+        REQUIRE(findParent(0x0021u) == 0u);   // Message Store PC
+        REQUIRE(findParent(0x0061u) == 0u);   // NameToIdMap PC
+        REQUIRE(findParent(0x01E1u) == 0u);   // Search Mgmt Queue (bare)
+        REQUIRE(findParent(0x060Du) == 0u);   // Search-folder template
+        REQUIRE(findParent(0x0671u) == 0u);   // Attachment template
     }
 }
 

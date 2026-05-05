@@ -544,12 +544,13 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         rootHier[2].displayNameUtf16le = nameSearchRoot.data();
         rootHier[2].displayNameSize    = nameSearchRoot.size();
         rootHier[2].hasSubfolders      = false;
-        pushTc(Nid{0x0000012Du}, Nid{0u}, buildFolderHierarchyTc(rootHier, 3));
+        pushTc(Nid{0x0000012Du}, Nid{0x00000122u},
+               buildFolderHierarchyTc(rootHier, 3));
 
-        // ---- 5. Root Folder Contents TC (0x12E) ----
-        pushTc(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc());
-        // ---- 6. Root Folder FAI Contents TC (0x12F) ----
-        pushTc(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc());
+        // ---- 5. Root Folder Contents TC (0x12E; nidParent = Root) ----
+        pushTc(Nid{0x0000012Eu}, Nid{0x00000122u}, buildFolderContentsTc());
+        // ---- 6. Root Folder FAI Contents TC (0x12F; nidParent = Root) ----
+        pushTc(Nid{0x0000012Fu}, Nid{0x00000122u}, buildFolderFaiContentsTc());
 
         // ---- 7. SearchManagementQueue (bare, 0x1E1) ----
         nodes.push_back({ Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload() });
@@ -581,9 +582,10 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         ipmSchema.hasSubfolders      = true;   // contains Deleted Items
         pushPc(Nid{0x00008022u}, Nid{0x00000122u},
                buildFolderPc(ipmSchema, kDummySub));
-        pushTc(Nid{0x0000802Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000802Eu}, Nid{0u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000802Fu}, Nid{0u}, buildFolderFaiContentsTc());
+        // IPM Subtree's three sibling tables: nidParent = IPM Subtree NID
+        pushTc(Nid{0x0000802Du}, Nid{0x00008022u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000802Eu}, Nid{0x00008022u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000802Fu}, Nid{0x00008022u}, buildFolderFaiContentsTc());
 
         // ---- 20-23. Search Root / Finder (0x8042; parent = Root) + tables ----
         FolderPcSchema finderSchema{};
@@ -591,9 +593,10 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         finderSchema.displayNameSize    = nameSearchRoot.size();
         pushPc(Nid{0x00008042u}, Nid{0x00000122u},
                buildFolderPc(finderSchema, kDummySub));
-        pushTc(Nid{0x0000804Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000804Eu}, Nid{0u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000804Fu}, Nid{0u}, buildFolderFaiContentsTc());
+        // Finder's three sibling tables: nidParent = Finder NID
+        pushTc(Nid{0x0000804Du}, Nid{0x00008042u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000804Eu}, Nid{0x00008042u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000804Fu}, Nid{0x00008042u}, buildFolderFaiContentsTc());
 
         // ---- 24-27. Deleted Items (0x8062; parent = IPM Subtree) + tables ----
         FolderPcSchema deletedSchema{};
@@ -601,9 +604,10 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         deletedSchema.displayNameSize    = nameDeletedItems.size();
         pushPc(Nid{0x00008062u}, Nid{0x00008022u},
                buildFolderPc(deletedSchema, kDummySub));
-        pushTc(Nid{0x0000806Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000806Eu}, Nid{0u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000806Fu}, Nid{0u}, buildFolderFaiContentsTc());
+        // Deleted Items' three sibling tables: nidParent = Deleted Items NID
+        pushTc(Nid{0x0000806Du}, Nid{0x00008062u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000806Eu}, Nid{0x00008062u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000806Fu}, Nid{0x00008062u}, buildFolderFaiContentsTc());
 
         if (nodes.size() != 27u) {
             return { false, "writeM6Pst: internal — expected 27 nodes" };
