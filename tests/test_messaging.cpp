@@ -841,7 +841,7 @@ TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
     REQUIRE(hn[3] == 0x7Cu);
     const uint16_t ibHnpm = detail::readU16(hn, 0);
     const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
-    REQUIRE(hn[tciOff + 1] == 0x14u);   // cCols = 20 (M11-K P4: dedicated Search Contents schema)
+    REQUIRE(hn[tciOff + 1] == 0x1Fu);   // cCols = 31 (M11-L P1: Contents 28 + 3 search-specific)
     REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);
 }
 
