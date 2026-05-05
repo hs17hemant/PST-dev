@@ -33,6 +33,26 @@ constexpr Nid kReservedTable[M5Allocator::kReservedCount] = {
 // 27-bit nidIndex space ceiling.
 constexpr uint32_t kMaxNidIndex = (1u << 27);
 
+// Starting nidIndex for user-allocatable nidTypes.
+//
+// Per [MS-PST] §2.4.3 the low nidIndex range is reserved for system-
+// mandated NIDs. Real Outlook (and Aspose-produced) PSTs place every
+// user-allocated folder/message/attachment/table at nidIndex >= 0x400.
+// Allocating user nodes inside the reserved range causes Outlook to
+// reject the file as malformed at open time — confirmed empirically
+// against an Aspose-vs-pstwriter byte-diff (Aspose folder 0x8082 idx
+// 0x404, message 0x200024 idx 0x10001; ours 0x22 / 0x24 idx 0x1).
+//
+// Internal (0x01) keeps starting at idx=1 because [SPEC sec 2.4.1]
+// pins multiple reserved Internal NIDs at low indices (NID_MESSAGE_STORE
+// = idx 1, NID_NAME_TO_ID_MAP = idx 3, ...). The reserved set is
+// pre-populated below and the counter skips past those automatically.
+//
+// HID (0x00) is not a node type — it identifies allocations inside the
+// LTP heap, never a node in the NBT — so its counter is unused but kept
+// at 1 for parity.
+constexpr uint32_t kUserAllocStart = 0x400u;
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -63,10 +83,13 @@ const Nid* M5Allocator::allReservedNids() noexcept
 // --------------------------------------------------------------------------
 M5Allocator::M5Allocator() noexcept
 {
-    // Counters start at nidIndex = 1 for every nidType slot.
+    // See kUserAllocStart comment above for the seeding rationale.
     for (size_t i = 0; i < 32; ++i) {
-        nextIndex_[i] = 1u;
+        nextIndex_[i] = kUserAllocStart;
     }
+    nextIndex_[static_cast<size_t>(NidType::HID)      & 0x1Fu] = 1u;
+    nextIndex_[static_cast<size_t>(NidType::Internal) & 0x1Fu] = 1u;
+
     // Reserve the 14 spec-mandated NIDs.
     for (size_t i = 0; i < kReservedCount; ++i) {
         allocated_.insert(kReservedTable[i].value);

@@ -57,13 +57,15 @@ TEST_CASE("NBT reader resolves every NID written by Phase B writer (single leaf)
 {
     M5Allocator alloc;
 
-    // Allocate 5 distinct NIDs across multiple nidTypes.
+    // Allocate 5 distinct NIDs across multiple nidTypes. User-allocatable
+    // types start at idx=0x400 (per [MS-PST] §2.4.3); Internal at idx=1
+    // and skips spec-reserved entries.
     const Nid nids[] = {
-        alloc.allocate(NidType::NormalFolder),  // idx 1 -> 0x22
-        alloc.allocate(NidType::NormalMessage), // idx 1 -> 0x24
-        alloc.allocate(NidType::Attachment),    // idx 1 -> 0x25
-        alloc.allocate(NidType::Internal),      // idx 2 -> 0x41 (idx 1 reserved)
-        alloc.allocate(NidType::NormalMessage), // idx 2 -> 0x44
+        alloc.allocate(NidType::NormalFolder),  // idx 0x400 -> 0x8002
+        alloc.allocate(NidType::NormalMessage), // idx 0x400 -> 0x8004
+        alloc.allocate(NidType::Attachment),    // idx 0x400 -> 0x8005
+        alloc.allocate(NidType::Internal),      // idx 2     -> 0x41 (idx 1 reserved)
+        alloc.allocate(NidType::NormalMessage), // idx 0x401 -> 0x8024
     };
     constexpr size_t kCount = sizeof(nids) / sizeof(nids[0]);
 

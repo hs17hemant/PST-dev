@@ -1,0 +1,78 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('test')/messages",
+  "value": [
+    {
+      "id": "AAMkAGI2TGAAA=",
+      "internetMessageId": "<6f3b7e2a-5d3d-4f1e-9b1c-1a2b3c4d5e60@example.com>",
+      "conversationId": "AAQkAGI2TGN1ll",
+      "subject": "Welcome to Taylor Morrison Vault",
+      "bodyPreview": "Thanks for joining the Vault platform. Here is what you can do next...",
+      "body": {
+        "contentType": "html",
+        "content": "<html><body><h2>Welcome!</h2><p>Thanks for joining the <b>Vault</b> platform.</p><ul><li>Configure your tenant</li><li>Run your first backup</li></ul></body></html>"
+      },
+      "createdDateTime": "2026-04-20T10:15:00Z",
+      "lastModifiedDateTime": "2026-04-20T10:15:00Z",
+      "sentDateTime": "2026-04-20T10:15:00Z",
+      "receivedDateTime": "2026-04-20T10:15:05Z",
+      "from": {
+        "emailAddress": { "name": "Vault Notifications", "address": "noreply@vault.example.com" }
+      },
+      "sender": {
+        "emailAddress": { "name": "Vault Notifications", "address": "noreply@vault.example.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Rohit Sharma", "address": "rohit.sharma@qfion.com" } }
+      ],
+      "ccRecipients": [
+        { "emailAddress": { "name": "Ops Team", "address": "ops@vault.example.com" } }
+      ],
+      "bccRecipients": [],
+      "isRead": false,
+      "isDraft": false,
+      "hasAttachments": false,
+      "importance": "normal",
+      "categories": ["Onboarding"],
+      "parentFolderId": "AQMkADAwATM0MDAAMS00ZjQ1LTAwAi0wMAoALgAAA"
+    },
+    {
+      "id": "AAMkAGI2TGAAB=",
+      "internetMessageId": "<a1b2c3d4-e5f6-7890-abcd-ef0123456789@example.com>",
+      "conversationId": "AAQkAGI2TGN2zz",
+      "subject": "Q2 mailbox archive ready",
+      "bodyPreview": "Your scheduled mailbox archive completed. See attached summary.",
+      "body": {
+        "contentType": "text",
+        "content": "Hi Rohit,\n\nYour scheduled mailbox archive completed successfully.\nTotal messages: 12,453\nArchive size: 1.8 GB\n\nThe download link expires in 7 days.\n\n— Vault Bot"
+      },
+      "createdDateTime": "2026-05-01T08:00:00Z",
+      "lastModifiedDateTime": "2026-05-01T08:00:00Z",
+      "sentDateTime": "2026-05-01T08:00:00Z",
+      "receivedDateTime": "2026-05-01T08:00:02Z",
+      "from": {
+        "emailAddress": { "name": "Vault Bot", "address": "bot@vault.example.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Rohit Sharma", "address": "rohit.sharma@qfion.com" } }
+      ],
+      "isRead": true,
+      "isDraft": false,
+      "hasAttachments": true,
+      "importance": "high",
+      "attachments": [
+        {
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          "name": "summary.txt",
+          "contentType": "text/plain",
+          "isInline": false,
+          "size": 64,
+          "contentBytes": "QXJjaGl2ZSBzdW1tYXJ5OiAxMiw0NTMgbWVzc2FnZXMsIDEuOCBHQiB0b3RhbC4="
+        }
+      ],
+      "internetMessageHeaders": [
+        { "name": "X-Vault-Job-Id", "value": "job-2026-05-01-0001" },
+        { "name": "X-Vault-Tenant", "value": "qfion-prod" }
+      ]
+    }
+  ]
+}

@@ -32,9 +32,14 @@ namespace pstwriter {
 class M5Allocator {
 public:
     // Pre-populates the reserved-NID set per [SPEC sec 2.4.1] in the
-    // constructor. Per-nidType counters all start at nidIndex = 1 (the
-    // smallest legal index given that nidIndex = 0 is unused per the
-    // sec 2.2.2.1 NID layout).
+    // constructor. Per-nidType counter seeding:
+    //   * Internal (0x01) and HID (0x00): start at nidIndex = 1, the
+    //     smallest legal index per [SPEC sec 2.2.2.1].
+    //   * Every other (user-allocatable) nidType: start at nidIndex =
+    //     0x400. Per [MS-PST] §2.4.3 the low-index range is reserved
+    //     for system NIDs; real Outlook / Aspose-produced PSTs place
+    //     user folders/messages/attachments/tables at idx >= 0x400.
+    //     Allocating below this causes Outlook to reject the file.
     M5Allocator() noexcept;
 
     // ------------------------------------------------------------------

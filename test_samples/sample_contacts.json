@@ -1,0 +1,62 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('test')/contacts",
+  "value": [
+    {
+      "id": "AAMkAGI2T-CONTACT-1=",
+      "parentFolderId": "AQMkADAwATM0MDAAMS00ZjQ1LTAwAi0wMAoALgAAA",
+      "createdDateTime": "2026-01-10T09:00:00Z",
+      "lastModifiedDateTime": "2026-04-22T14:32:00Z",
+      "displayName": "Alice Walker",
+      "givenName": "Alice",
+      "surname": "Walker",
+      "middleName": "M.",
+      "title": "Ms.",
+      "fileAs": "Walker, Alice",
+      "jobTitle": "VP Engineering",
+      "companyName": "Taylor Morrison",
+      "department": "Platform",
+      "officeLocation": "Scottsdale HQ",
+      "businessHomePage": "https://taylormorrison.com/eng",
+      "personalNotes": "Key escalation contact for backup failures.",
+      "emailAddresses": [
+        { "name": "Alice Walker (Work)", "address": "alice.walker@taylormorrison.com" },
+        { "name": "Alice (Personal)",    "address": "alice.walker@gmail.com" }
+      ],
+      "businessPhones": ["+1-480-555-0101", "+1-480-555-0102"],
+      "mobilePhone": "+1-602-555-0199",
+      "homePhones": ["+1-480-555-0150"],
+      "businessAddress": {
+        "street": "4900 N Scottsdale Rd",
+        "city": "Scottsdale",
+        "state": "AZ",
+        "postalCode": "85251",
+        "countryOrRegion": "United States"
+      },
+      "homeAddress": {
+        "street": "123 Mockingbird Ln",
+        "city": "Tempe",
+        "state": "AZ",
+        "postalCode": "85281",
+        "countryOrRegion": "United States"
+      },
+      "birthday": "1985-03-14T00:00:00Z",
+      "categories": ["Engineering", "Escalation"]
+    },
+    {
+      "id": "AAMkAGI2T-CONTACT-2=",
+      "parentFolderId": "AQMkADAwATM0MDAAMS00ZjQ1LTAwAi0wMAoALgAAA",
+      "createdDateTime": "2025-11-02T11:00:00Z",
+      "lastModifiedDateTime": "2026-03-15T16:00:00Z",
+      "displayName": "Bob Chen",
+      "givenName": "Bob",
+      "surname": "Chen",
+      "jobTitle": "DevOps Lead",
+      "companyName": "Qfion",
+      "emailAddresses": [
+        { "name": "Bob Chen", "address": "bob.chen@qfion.com" }
+      ],
+      "businessPhones": ["+1-415-555-0210"],
+      "categories": ["Vendor"]
+    }
+  ]
+}

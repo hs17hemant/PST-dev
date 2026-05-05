@@ -98,6 +98,23 @@ constexpr uint16_t kContentUnreadCount       = 0x3603u;
 constexpr uint16_t kSubfolders               = 0x360Au;
 constexpr uint16_t kPstHiddenCount           = 0x6635u;
 constexpr uint16_t kPstHiddenUnreadCount     = 0x6636u;
+
+// Bulk message-shape properties Outlook expects to surface in the
+// reading-pane preview / conversation view. Without these, real
+// Outlook tends to display the message as empty or with stale fields
+// — even when the underlying body / sender properties are present.
+// References: [MS-OXOMSG] §2.2.1.7 (Display* recipient strings),
+// [MS-OXCMSG] §2.2.1.5/§2.2.1.10 (Subject decomposition + sizes),
+// [MS-OXCMAIL] §2.2.1 (codepage tags).
+constexpr uint16_t kDisplayTo                = 0x0E04u;
+constexpr uint16_t kDisplayCc                = 0x0E03u;
+constexpr uint16_t kDisplayBcc               = 0x0E02u;
+constexpr uint16_t kConversationTopic        = 0x0070u;
+constexpr uint16_t kNormalizedSubject        = 0x0E1Du;
+constexpr uint16_t kSubjectPrefix            = 0x003Du;
+constexpr uint16_t kMessageSize              = 0x0E08u;
+constexpr uint16_t kInternetCodepage         = 0x3FDEu;
+constexpr uint16_t kLocalCommitTime          = 0x6722u;
 } // namespace pid_local
 
 // ----------------------------------------------------------------------------
@@ -234,6 +251,83 @@ uint32_t computeMessageFlags(const graph::GraphMessage& msg) noexcept
     return f;
 }
 
+// ----------------------------------------------------------------------------
+// Build the semicolon-separated display string for a recipient bucket.
+// Per [MS-OXOMSG] §2.2.1.7, PidTagDisplayTo/Cc/Bcc are flat UTF-16-LE
+// strings of recipient display names joined by "; ". Falls back to the
+// SMTP address when a recipient has no display name.
+// ----------------------------------------------------------------------------
+string joinRecipientDisplay(const vector<graph::Recipient>& bucket)
+{
+    string out;
+    for (size_t i = 0; i < bucket.size(); ++i) {
+        const auto& r = bucket[i];
+        const string& label = !r.emailAddress.name.empty()
+                                ? r.emailAddress.name
+                                : r.emailAddress.address;
+        if (label.empty()) continue;
+        if (!out.empty()) out += "; ";
+        out += label;
+    }
+    return out;
+}
+
+// ----------------------------------------------------------------------------
+// Split a subject into (prefix, normalized) parts per [MS-OXCMSG] §3.2.4.4.
+// A subject prefix is up to 3 ASCII letters followed by ": ". When no
+// prefix is present, returned prefix is empty and normalized == subject.
+// ----------------------------------------------------------------------------
+struct SubjectParts {
+    string prefix;       // e.g. "RE: " — empty when subject has no prefix
+    string normalized;   // subject minus prefix
+};
+
+SubjectParts splitSubject(const string& subject)
+{
+    SubjectParts p;
+    p.normalized = subject;
+
+    // Look for "<1..3 letters>: " at the start.
+    size_t letters = 0;
+    while (letters < subject.size() && letters < 3) {
+        const unsigned char c = static_cast<unsigned char>(subject[letters]);
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+            ++letters;
+        else
+            break;
+    }
+    if (letters >= 1 && letters + 1 < subject.size()
+        && subject[letters] == ':' && subject[letters + 1] == ' ')
+    {
+        p.prefix     = subject.substr(0, letters + 2);
+        p.normalized = subject.substr(letters + 2);
+    }
+    return p;
+}
+
+// ----------------------------------------------------------------------------
+// Compute an estimated PidTagMessageSize value. Outlook treats this as an
+// advisory total-bytes counter; an underestimate is harmless. We sum the
+// UTF-8 byte sizes of the largest text properties so the value is at
+// least proportional to the real on-disk footprint.
+// ----------------------------------------------------------------------------
+uint32_t estimateMessageSize(const graph::GraphMessage& msg) noexcept
+{
+    uint64_t total = 0;
+    total += msg.subject.size();
+    total += msg.body.content.size();
+    total += msg.bodyPreview.size();
+    for (const auto& h : msg.internetMessageHeaders) {
+        total += h.name.size() + h.value.size() + 4;
+    }
+    for (const auto& a : msg.attachments) {
+        total += static_cast<uint64_t>(a.size > 0 ? a.size : 0);
+        total += a.name.size() + a.contentType.size();
+    }
+    if (total > 0xFFFFFFFFull) total = 0xFFFFFFFFull;
+    return static_cast<uint32_t>(total);
+}
+
 } // namespace
 
 // ============================================================================
@@ -254,8 +348,21 @@ MailPcResult buildMailPc(const graph::GraphMessage& msg,
     // Message class — always "IPM.Note" for M7 mail.
     pb.addUnicodeString(pid_local::kMessageClass, "IPM.Note");
 
-    if (!msg.subject.empty())
+    if (!msg.subject.empty()) {
         pb.addUnicodeString(pid_local::kSubject, msg.subject);
+
+        // PidTagSubjectPrefix / PidTagNormalizedSubject / PidTagConversationTopic.
+        // Outlook's message-list view, conversation grouping, and search
+        // indexer all read these — without them the message often shows
+        // as "(no subject)" in the reading pane even though Subject is set.
+        const auto parts = splitSubject(msg.subject);
+        if (!parts.prefix.empty())
+            pb.addUnicodeString(pid_local::kSubjectPrefix, parts.prefix);
+        if (!parts.normalized.empty()) {
+            pb.addUnicodeString(pid_local::kNormalizedSubject, parts.normalized);
+            pb.addUnicodeString(pid_local::kConversationTopic, parts.normalized);
+        }
+    }
 
     // Body: plain-text always emitted when present; HTML body in Phase C
     // adds PidTagBodyHtml (Binary) on top.
@@ -281,13 +388,42 @@ MailPcResult buildMailPc(const graph::GraphMessage& msg,
     pb.addBoolean(pid_local::kHasAttachments,
                   !msg.attachments.empty() || msg.hasAttachments);
 
+    // PidTagObjectType = MAPI_MESSAGE (5). Outlook uses it to discriminate
+    // PCs at the protocol level; missing values surface as "unknown item".
+    pb.addInt32(pid_local::kObjectType, 5u);
+    pb.addInt32(pid_local::kMessageSize, estimateMessageSize(msg));
+
+    // PidTagInternetCodepage — for an HTML body Outlook needs the codepage
+    // to render correctly. UTF-8 is 65001 per the IANA charset registry,
+    // and is what Graph delivers HTML in.
+    if (msg.body.contentType == graph::BodyType::Html) {
+        pb.addInt32(pid_local::kInternetCodepage, 65001u);
+    }
+
+    // PidTagDisplay{To,Cc,Bcc} — semicolon-joined display names. Outlook's
+    // message-list "To" column reads PidTagDisplayTo directly (it does NOT
+    // re-derive from the recipient TC at view time); a missing value shows
+    // a blank "To" column even when the recipient TC is fully populated.
+    pb.addUnicodeString(pid_local::kDisplayTo,
+                        joinRecipientDisplay(msg.toRecipients));
+    pb.addUnicodeString(pid_local::kDisplayCc,
+                        joinRecipientDisplay(msg.ccRecipients));
+    pb.addUnicodeString(pid_local::kDisplayBcc,
+                        joinRecipientDisplay(msg.bccRecipients));
+
     // Times
     if (!msg.createdDateTime.empty())
         pb.addSystemTime(pid_local::kCreationTime,
                          graph::isoToFiletimeTicks(msg.createdDateTime));
-    if (!msg.lastModifiedDateTime.empty())
-        pb.addSystemTime(pid_local::kLastModificationTime,
-                         graph::isoToFiletimeTicks(msg.lastModifiedDateTime));
+    if (!msg.lastModifiedDateTime.empty()) {
+        const uint64_t ticks =
+            graph::isoToFiletimeTicks(msg.lastModifiedDateTime);
+        pb.addSystemTime(pid_local::kLastModificationTime, ticks);
+        // PidTagLocalCommitTime — Outlook's last-touched timestamp on the
+        // local store. Mirroring the modification time matches what real
+        // Outlook stores when the item arrived from the server.
+        pb.addSystemTime(pid_local::kLocalCommitTime, ticks);
+    }
     if (!msg.sentDateTime.empty())
         pb.addSystemTime(pid_local::kClientSubmitTime,
                          graph::isoToFiletimeTicks(msg.sentDateTime));
@@ -965,7 +1101,13 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
                 slEntries.emplace_back(s.nid, sBid, Bid{0u});
             }
 
-            // 5b. Recipient TC (combined To/Cc/Bcc)
+            // 5b. Recipient TC (combined To/Cc/Bcc).
+            //
+            // Per [MS-OXCMSG] §2.2.1.47.1 every message MUST own a recipient
+            // table at NID 0x692, even an outgoing autoreply with no
+            // recipients. A missing 0x692 subnode causes Outlook to flag
+            // the message as malformed at open time and may suppress the
+            // entire reading-pane preview.
             vector<graph::Recipient> allRecipients;
             allRecipients.reserve(m.toRecipients.size() + m.ccRecipients.size()
                                 + m.bccRecipients.size());
@@ -973,7 +1115,7 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             for (const auto& r : m.ccRecipients)  allRecipients.push_back(r);
             for (const auto& r : m.bccRecipients) allRecipients.push_back(r);
 
-            if (!allRecipients.empty()) {
+            {
                 auto recipTc = buildRecipientTc(allRecipients);
                 const Bid recipBid = scheduleDataBlock(std::move(recipTc.hnBytes));
                 slEntries.emplace_back(Nid{0x00000692u}, recipBid, Bid{0u});
