@@ -122,7 +122,7 @@ TEST_CASE("Bid: makeData() yields a data BID with both flags clear",
     REQUIRE(b.value == (0x00ABCDEFull << 2));
 }
 
-TEST_CASE("Bid: makeInternal() sets bit[1] (and pstwriter also sets bit[0])",
+TEST_CASE("Bid: makeInternal() sets bit[1] only (M11-J: bit[0] reserved must be 0)",
           "[types][bid]")
 {
     const Bid b = Bid::makeInternal(/*idx=*/0x42ull);
@@ -131,10 +131,13 @@ TEST_CASE("Bid: makeInternal() sets bit[1] (and pstwriter also sets bit[0])",
     REQUIRE_FALSE(b.isData());
     REQUIRE(b.index() == 0x42ull);
 
-    // Spec only requires bit[1] = 1; pstwriter additionally sets bit[0]
-    // to match Outlook-produced files.
-    REQUIRE((b.value & 0x2ull) == 0x2ull);
-    REQUIRE((b.value & 0x3ull) == 0x3ull);
+    // M11-J: per [MS-PST] §2.2.2.2 bit[0] is reserved (MUST be 0);
+    // bit[1] is the internal flag. Earlier pstwriter set BOTH on an
+    // unverified assumption — scanpst.exe rejects "BID is attached"
+    // when reserved bit[0] is set on internal SLBLOCK/SIBLOCK BIDs.
+    REQUIRE((b.value & 0x2ull) == 0x2ull);   // internal flag set
+    REQUIRE((b.value & 0x1ull) == 0x0ull);   // reserved bit clear
+    REQUIRE((b.value & 0x3ull) == 0x2ull);
 }
 
 TEST_CASE("Bid: counter increments by 4 (because flags occupy bottom two bits)",

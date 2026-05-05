@@ -54,6 +54,13 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
     const auto nameSpamSearch    = u16le("Spam Search Folder");
     const auto nameDeletedItems  = u16le("Deleted Items");
     const auto pstDisplay        = u16le(pstDisplayName);
+    // M11-J P3: Root Folder (NID 0x122) per [MS-PST] §2.4.3 must carry
+    // PR_DISPLAY_NAME or scanpst flags it missing. Reuse the PST display
+    // name when set, falling back to "Outlook Data File" — the conventional
+    // root folder name in real-Outlook PSTs.
+    const auto nameRootFolder    = pstDisplay.empty()
+                                     ? u16le("Outlook Data File")
+                                     : pstDisplay;
 
     // firstSubnodeNid required by buildPropertyContext but unused here
     // (no subnode-promoted props in baseline schemas).
@@ -78,7 +85,11 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
     // 3. Root Folder PC (0x122; nidParent = self)
     {
         FolderPcSchema rs{};
-        rs.hasSubfolders = true;
+        // M11-J P3: PR_DISPLAY_NAME populated so scanpst doesn't flag
+        // "Folder (nid=122): Missing PR_DISPLAY_NAME".
+        rs.displayNameUtf16le = nameRootFolder.data();
+        rs.displayNameSize    = nameRootFolder.size();
+        rs.hasSubfolders      = true;
         auto pc = buildFolderPc(rs, kDummySub);
         out.push_back(mkEntry(Nid{0x00000122u}, Nid{0x00000122u}, std::move(pc.hnBytes)));
     }

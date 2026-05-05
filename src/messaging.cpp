@@ -179,7 +179,12 @@ namespace {
 // for readability).
 constexpr TcColumn kHierarchyCols[13] = {
     // PidTag, propType, ibData, cbData, iBit
-    { 0x0E30u, PropType::Int32,    20,  4,  6 },  // ReplItemid
+    // M11-J: 0x0E30 is PtypBinary (PR_REPLICA_VERSION); was Int32
+    // — scanpst flagged "missing required column (0E300102)" because
+    // TCOLDESC.tag would have read 0x0E300003 instead of 0x0E300102.
+    // Same cell size (4-byte HID slot), same row layout — only the
+    // type bits in the tag change.
+    { 0x0E30u, PropType::Binary,   20,  4,  6 },  // ReplItemid (Binary HID)
     { 0x0E33u, PropType::Int64,    24,  8,  7 },  // ReplChangenum (PtypInteger64 0x14)
     { 0x0E34u, PropType::Binary,   32,  4,  8 },  // ReplVersionhistory (HID)
     { 0x0E38u, PropType::Int32,    36,  4,  9 },  // ReplFlags
@@ -304,7 +309,8 @@ constexpr TcColumn kContentsCols[28] = {
     { 0x0E07u, PropType::Int32,      16, 4,  4 },  // MessageFlags
     { 0x0E08u, PropType::Int32,      48, 4, 10 },  // MessageSize
     { 0x0E17u, PropType::Int32,       8, 4,  2 },  // MessageStatus
-    { 0x0E30u, PropType::Int32,      88, 4, 21 },  // ReplItemId
+    // M11-J: 0x0E30 is PtypBinary, not Int32 (scanpst expects 0x0E300102).
+    { 0x0E30u, PropType::Binary,     88, 4, 21 },  // ReplItemId (Binary HID)
     { 0x0E33u, PropType::Int64,      92, 8, 22 },  // ReplChangenum
     { 0x0E34u, PropType::Binary,    100, 4, 23 },  // ReplVersionhistory
     { 0x0E38u, PropType::Int32,     112, 4, 26 },  // ReplFlags

@@ -115,11 +115,20 @@ vector<uint8_t> buildHeapOnNode(const HnAllocation* allocs,
 
     // ------------------------------------------------------------------
     // HNPAGEMAP ([MS-PST] §2.3.1.5) — at offset ibHnpm. cAlloc covers
-    // user allocations PLUS the M11-H phantom (when present).
+    // user allocations PLUS the M11-H phantom (when present). cFree
+    // counts zero-size user allocations (M11-J: was hardcoded 0;
+    // scanpst flagged "free alloc count doesn't match (computed=N,
+    // expected=0)" on every empty TC, blocking column validation).
+    // The phantom is NOT counted as free — it has size 1..3 bytes.
     // ------------------------------------------------------------------
+    uint16_t cFree = 0;
+    for (size_t i = 0; i < allocCount; ++i) {
+        if (allocs[i].size == 0u) ++cFree;
+    }
+
     const size_t pmOff = ibHnpm;
     writeU16(out.data(), pmOff + 0, cAlloc);                              // cAlloc
-    writeU16(out.data(), pmOff + 2, 0u);                                  // cFree
+    writeU16(out.data(), pmOff + 2, cFree);                               // cFree (M11-J)
     for (size_t i = 0; i <= cAlloc; ++i) {
         writeU16(out.data(),
                  pmOff + kHnPageMapHdrSize + i * kHnPageMapEntrySize,

@@ -424,7 +424,7 @@ TEST_CASE("buildFolderHierarchyTc produces a Sec 3.12-shaped 13-col Hierarchy TC
         };
         // Sorted by tag ascending. Each row pinned from §3.12.
         const ExpectedCol expected[13] = {
-            { 0x0E300003u, 20, 4,  6 },  // ReplItemid
+            { 0x0E300102u, 20, 4,  6 },  // ReplItemid (M11-J: Binary, was Int32)
             { 0x0E330014u, 24, 8,  7 },  // ReplChangenum
             { 0x0E340102u, 32, 4,  8 },  // ReplVersionhistory
             { 0x0E380003u, 36, 4,  9 },  // ReplFlags
@@ -612,7 +612,7 @@ TEST_CASE("buildFolderContentsTc produces a Sec 3.12-shaped 27-col empty TC",
         { 0x0E070003u,  16, 4,  4 },  // MessageFlags
         { 0x0E080003u,  48, 4, 10 },  // MessageSize
         { 0x0E170003u,   8, 4,  2 },  // MessageStatus
-        { 0x0E300003u,  88, 4, 21 },  // ReplItemId
+        { 0x0E300102u,  88, 4, 21 },  // ReplItemId (M11-J: Binary, was Int32)
         { 0x0E330014u,  92, 8, 22 },  // ReplChangenum
         { 0x0E340102u, 100, 4, 23 },  // ReplVersionhistory
         { 0x0E380003u, 112, 4, 26 },  // ReplFlags

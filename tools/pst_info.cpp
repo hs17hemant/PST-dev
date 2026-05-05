@@ -29,6 +29,7 @@
 #include <cstring>
 #include <iostream>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -558,6 +559,14 @@ int runPstInfo(const string& path)
             uint16_t cb;
         };
         vector<DataBlockEntry> dataBlocks;
+        // M11-J: also collect ALL BBT bids (data + internal) so we can
+        // cross-check each NBTENTRY.bidSub resolves into the BBT.
+        // Outlook/scanpst rejects bidSub values that don't match an
+        // existing BBT entry — the M11-J BID encoding fix ensures the
+        // values written into NBTENTRY.bidSub and BBTENTRY.bid are the
+        // same byte pattern; this check pins the invariant going
+        // forward.
+        std::set<uint64_t> allBbtBids;
 
         auto verifyLeaf = [&](const uint8_t* leaf, const string& tag) {
             const uint8_t cEnt = leaf[kBtPageCEnt];
@@ -567,6 +576,7 @@ int runPstInfo(const string& path)
                 const uint64_t blockIb  = readU64(leaf, off + 8);
                 const uint16_t cb       = readU16(leaf, off + 16);
                 ++totalBbtEntries;
+                allBbtBids.insert(blockBid);  // M11-J cross-check set
                 // bit[1] of BID == 0 marks data blocks (vs internal
                 // XBLOCK/SLBLOCK/etc.). Data blocks are the only kind
                 // that can host an HN per [MS-PST] §2.3.1.
@@ -662,6 +672,63 @@ int runPstInfo(const string& path)
             log.pass(summary);
         } else {
             log.fail(summary);
+        }
+
+        // ---- M11-J: NBT walk + bidSub -> BBT cross-check ----------------------
+        // Walk every NBT leaf entry and verify its bidSub value (when
+        // non-zero) is present in `allBbtBids`. The pre-M11-J writer
+        // had Bid::makeInternal setting bits 0+1, but spec §2.2.2.2
+        // says bit 0 is reserved (must be 0). scanpst rejected
+        // "bid=7" SLBLOCK references; the lookup failed because of
+        // the reserved-bit pollution. This check pins the invariant.
+        size_t nbtEntries     = 0;
+        size_t bidSubChecked  = 0;
+        size_t bidSubMissing  = 0;
+        auto walkNbtPage = [&](auto&& self, uint64_t pageIb) -> void {
+            if (pageIb + kPageSize > file.size()) return;
+            const uint8_t* page = file.data() + pageIb;
+            const uint8_t cLevel = page[kBtPageCLevel];
+            const uint8_t cEnt   = page[kBtPageCEnt];
+            const uint8_t cbEnt  = page[kBtPageCbEnt];
+            if (cLevel == 0u) {
+                for (size_t i = 0; i < cEnt; ++i) {
+                    const size_t off = i * cbEnt;
+                    const uint64_t bidSub =
+                        readU64(page, off + 16);  // NBTENTRY layout: nid(4)+pad(4)+bidData(8)+bidSub(8)+nidParent(4)+pad(4)
+                    ++nbtEntries;
+                    if (bidSub == 0ull) continue;
+                    ++bidSubChecked;
+                    if (allBbtBids.find(bidSub) == allBbtBids.end()) {
+                        ++bidSubMissing;
+                        const uint32_t nid = readU32(page, off + 0);
+                        char m[160];
+                        std::snprintf(m, sizeof(m),
+                                      "NBTENTRY nid=0x%08X bidSub=0x%llX "
+                                      "not found in BBT (M11-J invariant)",
+                                      static_cast<unsigned>(nid),
+                                      static_cast<unsigned long long>(bidSub));
+                        log.fail(m);
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < cEnt; ++i) {
+                    const size_t off = i * cbEnt;
+                    const uint64_t childIb = readU64(page, off + 16);
+                    self(self, childIb);
+                }
+            }
+        };
+        walkNbtPage(walkNbtPage, brefNbtIb);
+        if (bidSubChecked == 0) {
+            // No NBTENTRYs have subnodes in this PST — silent pass.
+        } else if (bidSubMissing == 0) {
+            char m[140];
+            std::snprintf(m, sizeof(m),
+                          "M11-J: %lu NBTENTRY.bidSub all resolve in "
+                          "BBT (out of %lu NBT leaf entries)",
+                          static_cast<unsigned long>(bidSubChecked),
+                          static_cast<unsigned long>(nbtEntries));
+            log.pass(m);
         }
 
         // ---- Step 4: LTP walk -------------------------------------------------

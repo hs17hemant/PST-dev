@@ -468,6 +468,146 @@ files to confirm the M11-G/M11-H/M11-I fixes resolve the Tier 1
 + ISSUE G + ISSUE H errors and to surface any remaining issues
 that need a Tier 4 follow-up.
 
+### M11-J — Tier 4: BID encoding, cFree, 0x0E30 type, root folder, pst_info bidSub gate
+
+**Status: FIXED.**
+
+After M11-G/H/I, scanpst.exe on `m11hi_mail.pst` flagged five remaining
+real bugs (the previous claim that they were "stale parse-cascade
+artifacts" was wrong — they were genuine and required structural fixes):
+
+1. **Subnode BID lookup mismatch** (P1) — root cause of "Items not found":
+   ```
+   !!Invalid block (bid=7, ib=30208, cb=32, cRef=1): BID is attached (7)
+   !!Subnodes block (bid=7) not found in BBT
+   !!Invalid node (nid=8004, bidData=80, bidSub=7, ...)
+   ```
+   Per [MS-PST] §2.2.2.2, BID bit 0 is the "A" reserved field
+   (MUST be 0); bit 1 is the "i" internal flag. Earlier
+   `Bid::makeInternal` set BOTH on an unverified assumption that
+   "Outlook produces this pattern" — scanpst rejects it. With reserved
+   bit set, scanpst flags the BBT entry as malformed ("BID is
+   attached"), discards it from its rebuilt BBT, and the subsequent
+   NBTENTRY.bidSub→BBT lookup fails. Messages can't reach their
+   recipient/attachment subnode trees.
+
+   Fix: [include/pstwriter/types.hpp `Bid::makeInternal`](include/pstwriter/types.hpp)
+   now sets only bit 1 (`(idx << 2) | 0x2`), not bits 0+1
+   (`(idx << 2) | 0x3`). Internal BID values change throughout the
+   PST: SLBLOCKs that were 0x7, 0xB, 0xF... are now 0x6, 0xA, 0xE...
+   XBLOCKs / NBT pages / BBT pages also shift. Verified: regenerated
+   `m11j_mail.pst` has bidSub=0x6 / 0xA on the two messages, all
+   reachable via BBT lookup.
+
+2. **cFree hardcoded to 0** (caused "free alloc count doesn't match"
+   on every empty TC, blocking scanpst from validating columns):
+   ```
+   !!HN (nid=60D) free alloc count doesn't match (computed=2, expected=0)
+   !!TC (nid=60D) missing required column (3001001F)  [+ 10 more cascade]
+   ```
+   Per [MS-PST] §2.3.1.5 `cFree` is the count of free items in the
+   heap. Empty TCs have BTHHEADER + TCINFO + (empty)leaf + (empty)
+   matrix — the leaf and matrix have rgibAlloc[i+1] - rgibAlloc[i]
+   = 0, so cFree should be 2. Our writer hardcoded 0. scanpst
+   apparently treats the mismatch as a parse-blocker and reports
+   ALL columns as missing.
+
+   Fix: [src/ltp.cpp `buildHeapOnNode`](src/ltp.cpp) now computes
+   `cFree` as the count of zero-size user allocations (phantom is
+   never zero-size, so it doesn't count).
+
+3. **0x0E30 (PR_REPLICA_VERSION) type was Int32, scanpst expects
+   Binary** (P2):
+   ```
+   !!TC (nid=12D) missing required column (0E300102)
+   ```
+   scanpst matches columns by full tag (`pidTag << 16 | propType`).
+   Our schemas declared `0x0E30` as `Int32` (tag 0x0E300003), so
+   scanpst saw "0x0E300102" as missing even though we had the
+   pidTag.
+
+   Fix: [src/messaging.cpp `kHierarchyCols`](src/messaging.cpp) and
+   [`kContentsCols`](src/messaging.cpp) change `0x0E30` from
+   `PropType::Int32` to `PropType::Binary`. Same cell size
+   (4-byte HID slot); only the tag's type bits change.
+
+4. **Root folder NID 0x122 missing PR_DISPLAY_NAME** (P3):
+   ```
+   !!Folder (nid=122):
+       Missing PR_DISPLAY_NAME, PR_SUBFOLDERS, PR_CONTENT_COUNT,
+               PR_CONTENT_UNREAD
+   ```
+   The §2.7.1 baseline built the Root Folder PC with a default
+   `FolderPcSchema` (no displayName). PR_DISPLAY_NAME was emitted
+   as an empty UTF-16 string, which scanpst treats as "missing".
+
+   Fix: [src/pst_baseline.cpp `buildPstBaselineEntries`](src/pst_baseline.cpp)
+   sets the Root Folder's display name to the PST's display name
+   (or "Outlook Data File" if unset).
+
+5. **Inbox NID 0x8002 PR_CONTENT_COUNT/UNREAD** (P4) — verified
+   already correct in the writer; was a parse-cascade symptom of
+   the cFree / BID issues. `pst_info` shows the Inbox PC has
+   PidTag=0x3602 value=0x2 and PidTag=0x3603 value=0x1, matching
+   the 2-message Inbox with 1 unread.
+
+6. **Receive Folder Table** (P5) — verified NID 0x617 IS emitted
+   into the NBT (`bidData=0x1C`); scanpst's "missing" complaint
+   was likely cascade from the cFree/BID parse failures. Final
+   verdict pending fresh scanpst run on `m11j_mail.pst`.
+
+**Regression coverage**:
+
+[tools/pst_info.cpp](tools/pst_info.cpp) gains a new M11-J check —
+walks the NBT, collects every NBTENTRY.bidSub value, and verifies
+each one resolves to a BBTENTRY.bid. If the lookup fails, prints:
+```
+NBTENTRY nid=0x.. bidSub=0x.. not found in BBT (M11-J invariant)
+```
+On `m11j_mail.pst`:
+```
+[ OK ] M11-J: 2 NBTENTRY.bidSub all resolve in BBT (out of 32 NBT leaf entries)
+```
+
+[tests/test_types.cpp](tests/test_types.cpp) `[types][bid]` test
+updated: `makeInternal` now asserts bit 1 set, bit 0 clear,
+`b.value & 0x3 == 0x2` (was `== 0x3`).
+
+[tests/test_messaging.cpp](tests/test_messaging.cpp) Hierarchy and
+Contents TCOLDESC expectation arrays updated: `0x0E300003` →
+`0x0E300102`.
+
+**What remains for Tier 5** (not in this commit, all per the user's
+"DO NOT TOUCH" list):
+
+- BBT cRef counts (we emit 1; Aspose emits 2) — `??` warnings, not
+  `!!`. Cosmetic.
+- Outgoing Queue (NID 0x610) custom schema — currently uses
+  Search Contents Template. scanpst auto-recreates the queue
+  during recovery, so the file still opens.
+- Search folder noise (NIDs 0xEC1, 0x1E1, 0x2226, 0x2227, 0x6B6,
+  0x6D7, 0x6F8) — scanpst auto-recreates.
+- Hierarchy Table row mismatch (downstream of P3+P4 cascade —
+  should silence with M11-J fixes).
+- PMap @ 0x4600 garbage — scanpst probes the deprecated PMap
+  structure; PMap is optional per §2.6.2.
+
+**Verification**:
+```
+test cases:  233 |  231 passed | 2 skipped
+assertions: 5622 | 5622 passed
+```
+
+`pst_info ALL CHECKS PASSED` on regenerated mail/contacts/calendar
+PSTs; new M11-J cross-check confirms all `bidSub` values resolve.
+
+User to re-run scanpst.exe on `m11j_mail.pst` to confirm:
+- "Items not found" → 0
+- "TC missing required column" → 0
+- "Folder (nid=122): Missing ..." → 0
+- "Receive folder table missing" → 0
+- "free alloc count doesn't match" → 0
+
 ### M11-F — Show-stoppers from external code review (TC overflow / XBLOCK chaining / buffer aliasing / RowVer)
 
 **Status: FIXED (4 of 21 review items). 17 remaining items deferred to M10+.**
