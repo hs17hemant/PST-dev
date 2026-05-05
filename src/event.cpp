@@ -422,7 +422,9 @@ WriteResult writeM9Pst(const M9PstConfig& config) noexcept
             }
             const HierarchyTcRow* rowsPtr = ipmHier.empty() ? nullptr : ipmHier.data();
             auto tc = buildFolderHierarchyTc(rowsPtr, ipmHier.size());
-            scheduleNode(Nid{0x0000802Du}, Nid{0u}, std::move(tc.hnBytes));
+            // IPM Subtree's hierarchy table: nidParent = IPM Subtree NID.
+            scheduleNode(Nid{0x0000802Du}, Nid{0x00008022u},
+                         std::move(tc.hnBytes));
         }
 
         // ============================================================
