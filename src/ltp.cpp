@@ -41,25 +41,54 @@ vector<uint8_t> buildHeapOnNode(const HnAllocation* allocs,
     // immediately follows the last allocation. Total HN body size =
     // ibHnpm + HNPAGEMAP size.
     // ------------------------------------------------------------------
+    // Pre-flight: cumulative cursor past all user allocations. If this
+    // is not DWORD-aligned, we need to insert a "phantom" allocation
+    // that absorbs the alignment pad — see M11-H below.
+    uint16_t cursorAfterUser = static_cast<uint16_t>(kHnHdrSize);
+    for (size_t i = 0; i < allocCount; ++i) {
+        cursorAfterUser = static_cast<uint16_t>(cursorAfterUser + allocs[i].size);
+    }
+    const uint16_t ibHnpm = static_cast<uint16_t>((cursorAfterUser + 3u) & ~uint32_t{3u});
+    const bool     hasPhantom = (cursorAfterUser != ibHnpm);
+
+    // HNPAGEMAP must start at a 4-byte (DWORD) boundary. [MS-PST]
+    // §2.3.1.5 prose: "rgibAlloc[cAlloc] points to the location of
+    // the next allocation. This in turn implies that the value MUST
+    // be DWORD-aligned." Real-Outlook scanpst confirms this — it
+    // flags `ibLast != ibHnpm` on every HN as an error in recovery.
+    //
+    // If cumulative user-alloc cursor is not DWORD-aligned, the
+    // simplest fix (push ibHnpm as the sentinel) makes the LAST user
+    // allocation appear N bytes longer to consumers (the pad bytes
+    // get attributed to it), which corrupts PT_BINARY values and
+    // bloats PT_UNICODE strings. Instead we insert a "phantom"
+    // allocation between the last user data and ibHnpm — bytes
+    // [cursorAfterUser, ibHnpm) become a separate (zero-filled)
+    // allocation. cAlloc grows by 1 in this case; user allocations
+    // keep their exact size when consumers compute it via
+    // rgibAlloc[i+1] - rgibAlloc[i]. The phantom HID is unreferenced.
+    //
+    // Note the §3.11 spec sample places the sentinel at ibHnpm-1
+    // without a phantom (cAlloc=7, rgibAlloc[7]=0x1BB, ibHnpm=0x1BC).
+    // We follow [MS-PST] §2.3.1.5 prose + scanpst, which makes the
+    // §3.11 byte-diff test diverge at the rgibAlloc[cAlloc] slot and
+    // (when phantom needed) at cAlloc itself. (M11-H.)
+    const uint16_t cAlloc = static_cast<uint16_t>(allocCount + (hasPhantom ? 1u : 0u));
+
     vector<uint16_t> ibAlloc;
-    ibAlloc.reserve(allocCount + 1);
-    uint16_t cursor = static_cast<uint16_t>(kHnHdrSize);  // first alloc starts after HNHDR
+    ibAlloc.reserve(static_cast<size_t>(cAlloc) + 1u);
+    uint16_t cursor = static_cast<uint16_t>(kHnHdrSize);
     for (size_t i = 0; i < allocCount; ++i) {
         ibAlloc.push_back(cursor);
         cursor = static_cast<uint16_t>(cursor + allocs[i].size);
     }
-    ibAlloc.push_back(cursor);  // sentinel: where the next-to-allocate would begin
-
-    // HNPAGEMAP must start at a 4-byte (DWORD) boundary. Empirically
-    // confirmed by [MS-PST] §3.8 (allocs end at 0xEC, naturally DWORD-
-    // aligned, ibHnpm=0xEC) AND §3.11 (allocs end at 0x1BB, 1 byte of
-    // alignment pad before ibHnpm=0x1BC). The pad bytes between the
-    // sentinel and ibHnpm are zero-filled and belong to neither the
-    // user allocations nor the HNPAGEMAP.
-    const uint16_t ibHnpm = static_cast<uint16_t>((cursor + 3u) & ~uint32_t{3u});
+    if (hasPhantom) {
+        ibAlloc.push_back(cursor);  // start of phantom = end of last user alloc
+    }
+    ibAlloc.push_back(ibHnpm);      // sentinel = ibHnpm (DWORD-aligned, M11-H)
 
     const size_t   pageMapBytes  = kHnPageMapHdrSize
-                                 + (allocCount + 1) * kHnPageMapEntrySize;
+                                 + (static_cast<size_t>(cAlloc) + 1u) * kHnPageMapEntrySize;
     const size_t   totalSize     = static_cast<size_t>(ibHnpm) + pageMapBytes;
 
     vector<uint8_t> out(totalSize, 0u);
@@ -85,12 +114,22 @@ vector<uint8_t> buildHeapOnNode(const HnAllocation* allocs,
     }
 
     // ------------------------------------------------------------------
-    // HNPAGEMAP ([MS-PST] §2.3.1.5) — at offset ibHnpm.
+    // HNPAGEMAP ([MS-PST] §2.3.1.5) — at offset ibHnpm. cAlloc covers
+    // user allocations PLUS the M11-H phantom (when present). cFree
+    // counts zero-size user allocations (M11-J: was hardcoded 0;
+    // scanpst flagged "free alloc count doesn't match (computed=N,
+    // expected=0)" on every empty TC, blocking column validation).
+    // The phantom is NOT counted as free — it has size 1..3 bytes.
     // ------------------------------------------------------------------
+    uint16_t cFree = 0;
+    for (size_t i = 0; i < allocCount; ++i) {
+        if (allocs[i].size == 0u) ++cFree;
+    }
+
     const size_t pmOff = ibHnpm;
-    writeU16(out.data(), pmOff + 0, static_cast<uint16_t>(allocCount));  // cAlloc
-    writeU16(out.data(), pmOff + 2, 0u);                                  // cFree
-    for (size_t i = 0; i <= allocCount; ++i) {
+    writeU16(out.data(), pmOff + 0, cAlloc);                              // cAlloc
+    writeU16(out.data(), pmOff + 2, cFree);                               // cFree (M11-J)
+    for (size_t i = 0; i <= cAlloc; ++i) {
         writeU16(out.data(),
                  pmOff + kHnPageMapHdrSize + i * kHnPageMapEntrySize,
                  ibAlloc[i]);
@@ -520,10 +559,21 @@ TcRgib computeTcRgib(const TcColumn* cols, size_t colCount) noexcept
 //                       row-major TC assumption in KNOWN_UNVERIFIED.md.)
 // ----------------------------------------------------------------------------
 TcResult buildTableContext(const TcColumn* cols, size_t colCount,
-                           const TcRow*    rows, size_t rowCount)
+                           const TcRow*    rows, size_t rowCount,
+                           Nid             firstSubnodeNid)
 {
     if (colCount == 0) {
         throw std::invalid_argument("buildTableContext: must have at least one column");
+    }
+
+    // Subnode NIDs (when row matrix promotion is enabled) MUST have
+    // nidType != HID so HNID decoding picks the NID branch per
+    // [MS-PST] §2.3.3.2.
+    if (firstSubnodeNid.value != 0u
+        && firstSubnodeNid.type() == NidType::HID)
+    {
+        throw std::invalid_argument(
+            "buildTableContext: firstSubnodeNid must have nidType != HID");
     }
 
     // ---- Validate per-column constraints ----
@@ -583,35 +633,6 @@ TcResult buildTableContext(const TcColumn* cols, size_t colCount,
             return rows[a].rowId < rows[b].rowId;
         });
 
-    // ---- Build TCINFO + TCOLDESC array ----
-    const size_t tcInfoSize = 22u + 8u * colCount;
-    vector<uint8_t> tcInfo(tcInfoSize);
-    detail::writeU8 (tcInfo.data(),  0, kTcSignature);
-    detail::writeU8 (tcInfo.data(),  1, static_cast<uint8_t>(colCount));
-    detail::writeU16(tcInfo.data(),  2, rg.end4b);
-    detail::writeU16(tcInfo.data(),  4, rg.end2b);
-    detail::writeU16(tcInfo.data(),  6, rg.end1b);
-    detail::writeU16(tcInfo.data(),  8, rg.endBm);
-    // hidRowIndex = HID 0x20 (RowIndex BTHHEADER, slot 1)
-    detail::writeU32(tcInfo.data(), 10, makeHid(1));
-    // hnidRows = HID 0x80 if rowCount > 0; 0 if empty per [MS-PST] §2.3.4.1
-    // ("This value is set to zero if the TC contains no rows.")
-    detail::writeU32(tcInfo.data(), 14, rowCount > 0u ? makeHid(4) : 0u);
-    // hidIndex = 0 (deprecated; creators MUST set to zero)
-    detail::writeU32(tcInfo.data(), 18, 0u);
-
-    // TCOLDESC array, sorted by tag.
-    for (size_t s = 0; s < colCount; ++s) {
-        const TcColumn& c = cols[colOrder[s]];
-        uint8_t* dst = tcInfo.data() + 22u + s * 8u;
-        const uint32_t tag = (static_cast<uint32_t>(c.pidTagId) << 16)
-                           | static_cast<uint32_t>(c.propType);
-        detail::writeU32(dst, 0, tag);
-        detail::writeU16(dst, 4, c.ibData);
-        detail::writeU8 (dst, 6, c.cbData);
-        detail::writeU8 (dst, 7, c.iBit);
-    }
-
     // ---- Build RowIndex BTHHEADER (cbKey=4 NID, cbEnt=4 row#, hidRoot=HID 0x60) ----
     const auto rowIdxHdr = encodeBthHeader(/*cbKey=*/4, /*cbEnt=*/4,
                                            /*bIdxLevels=*/0,
@@ -632,41 +653,139 @@ TcResult buildTableContext(const TcColumn* cols, size_t colCount,
         }
     }
 
-    // ---- Build Row Matrix (with varlen HIDs patched in row-major order) ----
-    vector<uint8_t> rowMatrix(rowCount * rg.endBm);
-    // The first per-row varlen value gets HID slot 5 (= 0xA0).
-    uint16_t nextVarlenSlot = 5;
+    // ---- Compute Row Matrix size + collect varlen-payload pointers ----
+    // Row Matrix is `rowCount × endBm` bytes. Varlen HID-slot patching
+    // is deferred until after the promotion decision — slot numbering
+    // depends on whether the row matrix occupies HN slot 4 (no
+    // promotion) or moves to a subnode (promoted).
+    const size_t rowMatrixSize = rowCount * rg.endBm;
+    vector<uint8_t> rowMatrix(rowMatrixSize);
 
-    // Caller's varlen cell payloads, recorded in row-major / cell-order
-    // order so the HN allocator emits them in the same sequence.
     struct VarlenAlloc {
+        size_t         rowMatrixOffset;  // where to patch the HID
         const uint8_t* data;
         size_t         size;
     };
     vector<VarlenAlloc> varlenAllocs;
 
+    size_t totalVarlenBytes = 0;
     for (size_t s = 0; s < rowCount; ++s) {
         const size_t srcIdx = rowOrder[s];
         const TcRow& r = rows[srcIdx];
 
-        // Copy the caller's row bytes.
+        // Copy the caller's row bytes (varlen HID-slot patches happen below).
         if (rg.endBm > 0u) {
             std::memcpy(rowMatrix.data() + s * rg.endBm, r.rowBytes, rg.endBm);
         }
-
-        // Patch each varlen HID slot. Cells visited in caller-supplied
-        // order — the row-major ordering convention says: within a row
-        // we honor caller order, across rows we go sorted-rowId order.
         for (size_t j = 0; j < r.varlenCount; ++j) {
             const TcVarlenCell& v = r.varlenCells[j];
             const TcColumn& c = cols[v.colIndex];
-
-            const uint32_t hid = makeHid(nextVarlenSlot);
-            ++nextVarlenSlot;
-
-            detail::writeU32(rowMatrix.data() + s * rg.endBm + c.ibData, 0, hid);
-            varlenAllocs.push_back({v.bytes, v.size});
+            VarlenAlloc va;
+            va.rowMatrixOffset = s * rg.endBm + c.ibData;
+            va.data            = v.bytes;
+            va.size            = v.size;
+            varlenAllocs.push_back(va);
+            totalVarlenBytes += v.size;
         }
+    }
+
+    // ---- Decide whether to promote the row matrix to a subnode ----
+    //
+    // HN body size estimate (for the no-promotion layout):
+    //   HNHDR (kHnHdrSize) + sum(alloc sizes) + DWORD-align pad
+    //                       + HNPAGEMAP (4 + 2*(allocCount+1) bytes)
+    //
+    // Rather than build the HN twice on overflow, we compute the
+    // estimate up front and choose layout. When the estimate exceeds
+    // kMaxHnBodyBytes AND firstSubnodeNid is valid, we promote: the
+    // row matrix moves out of the HN into a single subnode payload
+    // (caller handles further chunking via XBLOCK if rowMatrixSize
+    // itself exceeds the per-block cap).
+    const size_t tcInfoSize = 22u + 8u * colCount;
+    auto estimateHnSize = [&](bool promoted) noexcept -> size_t {
+        size_t total = 8u                       // RowIndex BTHHEADER
+                     + tcInfoSize               // TCINFO + TCOLDESC
+                     + rowCount * 8u            // RowIndex BTH leaf
+                     + totalVarlenBytes;        // varlen payloads
+        size_t allocCount = 3u + varlenAllocs.size();
+        if (!promoted) {
+            total      += rowMatrixSize;        // row matrix inline
+            allocCount += 1u;
+        }
+        const size_t cursorRaw     = kHnHdrSize + total;
+        const size_t cursorAligned = (cursorRaw + 3u) & ~size_t{3u};
+        // M11-H: a phantom allocation absorbs the alignment pad when
+        // cumulative cursor is not DWORD-aligned, adding one more
+        // rgibAlloc entry (2 bytes) to HNPAGEMAP.
+        if (cursorRaw != cursorAligned) {
+            allocCount += 1u;
+        }
+        const size_t hnpmSize = 4u + 2u * (allocCount + 1u);
+        return cursorAligned + hnpmSize;
+    };
+
+    const size_t estIfInline = estimateHnSize(/*promoted=*/false);
+    bool promote = false;
+    if (estIfInline > kMaxHnBodyBytes && rowCount > 0u) {
+        if (firstSubnodeNid.value == 0u) {
+            throw std::length_error(
+                "buildTableContext: HN body exceeds single-block cap (8176); "
+                "pass firstSubnodeNid (with nidType != HID) to enable "
+                "row-matrix-as-subnode promotion per [MS-PST] §2.3.4.4.1");
+        }
+        const size_t estIfPromoted = estimateHnSize(/*promoted=*/true);
+        if (estIfPromoted > kMaxHnBodyBytes) {
+            throw std::length_error(
+                "buildTableContext: HN body exceeds single-block cap (8176) "
+                "even after row-matrix promotion — varlen payloads in the "
+                "parent HN are themselves too large");
+        }
+        promote = true;
+    }
+
+    // ---- Patch row-matrix varlen HIDs with the right slot start ----
+    // Without promotion: row matrix is HN slot 4, varlens start at 5.
+    // With promotion: row matrix moves to a subnode, varlens shift to 4.
+    {
+        uint16_t nextVarlenSlot = static_cast<uint16_t>(promote ? 4u : 5u);
+        for (auto& v : varlenAllocs) {
+            const uint32_t hid = makeHid(nextVarlenSlot++);
+            detail::writeU32(rowMatrix.data() + v.rowMatrixOffset, 0, hid);
+        }
+    }
+
+    // ---- Build TCINFO + TCOLDESC array ----
+    vector<uint8_t> tcInfo(tcInfoSize);
+    detail::writeU8 (tcInfo.data(),  0, kTcSignature);
+    detail::writeU8 (tcInfo.data(),  1, static_cast<uint8_t>(colCount));
+    detail::writeU16(tcInfo.data(),  2, rg.end4b);
+    detail::writeU16(tcInfo.data(),  4, rg.end2b);
+    detail::writeU16(tcInfo.data(),  6, rg.end1b);
+    detail::writeU16(tcInfo.data(),  8, rg.endBm);
+    // hidRowIndex = HID 0x20 (RowIndex BTHHEADER, slot 1)
+    detail::writeU32(tcInfo.data(), 10, makeHid(1));
+    // hnidRows: per [MS-PST] §2.3.4.1
+    //   * 0          if rowCount == 0
+    //   * HID 0x80   if row matrix lives at HN slot 4 (no promotion)
+    //   * NID        if promoted to a subnode (HNID NID branch)
+    uint32_t hnidRowsValue = 0u;
+    if (rowCount > 0u) {
+        hnidRowsValue = promote ? firstSubnodeNid.value : makeHid(4);
+    }
+    detail::writeU32(tcInfo.data(), 14, hnidRowsValue);
+    // hidIndex = 0 (deprecated; creators MUST set to zero)
+    detail::writeU32(tcInfo.data(), 18, 0u);
+
+    // TCOLDESC array, sorted by tag.
+    for (size_t s = 0; s < colCount; ++s) {
+        const TcColumn& c = cols[colOrder[s]];
+        uint8_t* dst = tcInfo.data() + 22u + s * 8u;
+        const uint32_t tag = (static_cast<uint32_t>(c.pidTagId) << 16)
+                           | static_cast<uint32_t>(c.propType);
+        detail::writeU32(dst, 0, tag);
+        detail::writeU16(dst, 4, c.ibData);
+        detail::writeU8 (dst, 6, c.cbData);
+        detail::writeU8 (dst, 7, c.iBit);
     }
 
     // ---- Assemble HN allocations in slot order ----
@@ -675,9 +794,11 @@ TcResult buildTableContext(const TcColumn* cols, size_t colCount,
     allocs.push_back({rowIdxHdr.data(), rowIdxHdr.size()});       // slot 1 — HID 0x20
     allocs.push_back({tcInfo.data(),    tcInfo.size()});          // slot 2 — HID 0x40
     allocs.push_back({rowIdxLeaf.data(),rowIdxLeaf.size()});      // slot 3 — HID 0x60
-    allocs.push_back({rowMatrix.data(), rowMatrix.size()});       // slot 4 — HID 0x80
+    if (!promote) {
+        allocs.push_back({rowMatrix.data(), rowMatrix.size()});   // slot 4 — HID 0x80
+    }
     for (const auto& v : varlenAllocs) {
-        allocs.push_back({v.data, v.size});                       // slot 5+ — HID 0xA0+
+        allocs.push_back({v.data, v.size});                       // slots 4+/5+
     }
 
     TcResult out;
@@ -686,8 +807,32 @@ TcResult buildTableContext(const TcColumn* cols, size_t colCount,
                                   /*hidUserRoot=*/makeHid(2));    // TCINFO at HID 0x40
 
     if (out.hnBytes.size() > kMaxHnBodyBytes) {
+        // Defensive: estimateHnSize should match buildHeapOnNode bytes
+        // exactly; throwing here means the estimator drifted from the
+        // builder. Catch it loudly rather than ship a corrupt HN.
         throw std::length_error(
-            "buildTableContext: HN body exceeds single-block cap (8176)");
+            "buildTableContext: HN body exceeds single-block cap (8176) "
+            "after layout decision — internal estimator drift");
+    }
+
+    if (promote) {
+        // Caller schedules these bytes through its data-block layer
+        // (XBLOCK chained when rowMatrixSize > kMaxBlockPayload) and
+        // emplaces a SLENTRY {firstSubnodeNid, bidData, 0}.
+        // We move rowMatrix into out.subnodes' returned vector so the
+        // pointer/size pair stays valid for the caller; we wrap it in
+        // a small heap-owning shim by leveraging PcSubnodeOut's owned
+        // bytes contract — but PcSubnodeOut takes raw data + size, so
+        // we must keep `rowMatrix` alive. Move into a member of
+        // TcResult instead.
+        //
+        // (We extend TcResult here to carry owned subnode bytes;
+        // see ltp.hpp.)
+        out.subnodes.push_back({firstSubnodeNid, /*pidTagId=*/0u,
+                                /*data=*/nullptr, /*size=*/0u});
+        out.ownedSubnodeBytes.push_back(std::move(rowMatrix));
+        out.subnodes.back().data = out.ownedSubnodeBytes.back().data();
+        out.subnodes.back().size = out.ownedSubnodeBytes.back().size();
     }
 
     return out;

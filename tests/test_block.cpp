@@ -102,7 +102,7 @@ bool fileSelfCheck(const vector<uint8_t>& file)
         return true;
     };
 
-    if (!checkPageAt(0x400)) return false;
+    if (!checkPageAt(0x4400)) return false;   // M11-G: AMap[0] at 0x4400
     if (!checkPageAt(readU64(h, hdr::kBrefNbtIb))) return false;
     if (!checkPageAt(readU64(h, hdr::kBrefBbtIb))) return false;
 

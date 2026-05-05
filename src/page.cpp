@@ -32,8 +32,19 @@ array<uint8_t, kPageSize> buildAMap(Ib ibAMap, uint64_t fileSize) noexcept
 {
     array<uint8_t, kPageSize> page{};
 
-    // Each bit covers 64 bytes.  Set the first ceil(fileSize / 64) bits.
-    const uint64_t totalBits = (fileSize + kBytesPerAMapBit - 1) / kBytesPerAMapBit;
+    // Each bit covers 64 bytes IN THE COVERAGE RANGE [ibAMap, ibAMap +
+    // kAMapCoverage). Bytes outside this AMap's range (e.g. the
+    // [0, kIbAMap) HEADER region) are not tracked by this AMap.
+    // Set bits 0..ceil((min(fileSize, ibAMap+coverage) - ibAMap)/64).
+    // Bit 0 corresponds to bytes [ibAMap, ibAMap+64) — the AMap page
+    // itself sits in bits 0..7 (512 bytes / 64) and is therefore
+    // marked allocated, exactly what the spec requires. (M11-G.)
+    const uint64_t coverageEnd  = ibAMap.value + kAMapCoverage;
+    const uint64_t allocatedEnd = fileSize < coverageEnd ? fileSize : coverageEnd;
+    const uint64_t allocatedBytes =
+        allocatedEnd > ibAMap.value ? (allocatedEnd - ibAMap.value) : 0;
+    const uint64_t totalBits =
+        (allocatedBytes + kBytesPerAMapBit - 1) / kBytesPerAMapBit;
     const uint64_t fullBytes = totalBits / 8;
     const uint64_t leftover  = totalBits % 8;
 

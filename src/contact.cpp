@@ -488,7 +488,7 @@ WriteResult writeM8Pst(const M8PstConfig& config) noexcept
         // ============================================================
         // 7. Encode all blocks + assemble M5DataBlockSpec list.
         // ============================================================
-        constexpr uint64_t kBlocksStart = 0x600u;
+        constexpr uint64_t kBlocksStart = 0x4600u;  // M11-G: blocks live after AMap[0] @ 0x4400
 
         vector<M5DataBlockSpec> m5Blocks;
         vector<M5Node>          m5Nodes;

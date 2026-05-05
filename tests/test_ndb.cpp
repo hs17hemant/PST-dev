@@ -268,14 +268,17 @@ TEST_CASE("Empty BBT leaf has cEnt=0, cbEnt=24, cLevel=0, valid trailer",
 TEST_CASE("AMap for the M2 skeleton marks first 5 pages allocated",
           "[ndb][page][amap]")
 {
-    const Ib  ib  { 0x0400ull };
-    const auto page = buildAMap(ib, /*fileSize=*/0x0A00);
+    // M11-G: AMap[0] is at 0x4400, file ends at 0x4A00. Coverage range
+    // is [0x4400, 0x4400 + 0x3E000); allocated bytes within = 0x600
+    // = 24 bits = 3 full 0xFF bytes.
+    const Ib  ib  { 0x4400ull };
+    const auto page = buildAMap(ib, /*fileSize=*/0x4A00);
 
-    // 0x0A00 / 64 = 40 bits set → 5 full bytes of 0xFF, then zero.
-    for (size_t i = 0; i < 5; ++i) {
+    // (0x4A00 - 0x4400) / 64 = 24 bits → 3 full bytes of 0xFF, then zero.
+    for (size_t i = 0; i < 3; ++i) {
         REQUIRE(page[i] == 0xFFu);
     }
-    REQUIRE(page[5] == 0x00u);
+    REQUIRE(page[3] == 0x00u);
     // Skip checking the entire bitmap; sample one mid-range byte.
     REQUIRE(page[200] == 0x00u);
 
@@ -401,7 +404,10 @@ TEST_CASE("writeEmptyPst produces a 5-page skeleton that self-checks clean",
 
     vector<uint8_t> file;
     REQUIRE(readEntireFile(path, file));
-    REQUIRE(file.size() == 0x0A00);
+    // M11-G: AMap[0] now lives at 0x4400 per [MS-PST] §2.6.1.1, with a
+    // 16 KB HEADER region [0x400, 0x4400) before it. M2 empty PST is
+    // therefore HEADER + 16KB pad + AMap + NBT + BBT = 0x4A00 bytes.
+    REQUIRE(file.size() == 0x4A00);
 
     // HEADER magic & CRCs
     const uint8_t* h = file.data();
@@ -410,11 +416,11 @@ TEST_CASE("writeEmptyPst produces a 5-page skeleton that self-checks clean",
     REQUIRE(readU32(h, hdr::kCrcPartial)  == crc32(h + hdr::kMagicClient, kHdrCrcPartialLen));
     REQUIRE(readU32(h, hdr::kCrcFull)     == crc32(h + hdr::kMagicClient, kHdrCrcFullLen));
     REQUIRE(h[hdr::kFAMapValid]           == kAMapValid2);
-    REQUIRE(readU64(h, hdr::kIbFileEof)   == 0x0A00ull);
-    REQUIRE(readU64(h, hdr::kIbAMapLast)  == 0x0400ull);
+    REQUIRE(readU64(h, hdr::kIbFileEof)   == 0x4A00ull);
+    REQUIRE(readU64(h, hdr::kIbAMapLast)  == 0x4400ull);
 
     // Page trailers — each post-header page must self-CRC and have ptype==ptypeRepeat.
-    const uint64_t pageOffsets[] = { 0x0400ull, 0x0600ull, 0x0800ull };
+    const uint64_t pageOffsets[] = { 0x4400ull, 0x4600ull, 0x4800ull };
     const uint8_t  pageTypes[]   = { ptype::kAMap, ptype::kNBT, ptype::kBBT };
 
     for (size_t i = 0; i < 3; ++i) {

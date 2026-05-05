@@ -217,3 +217,112 @@ TEST_CASE("M7 writeM7Pst: empty folder list still produces 27-node baseline",
 
     std::remove(cfg.path.c_str());
 }
+
+// ----------------------------------------------------------------------------
+// Phase 2 (#1) regression: a folder with enough messages that the
+// Contents TC row matrix overflows the 8176-byte single-block HN cap
+// and must be promoted to a subnode per [MS-PST] §2.3.4.4.1.
+//
+// Per-row endBm is 122 bytes; ~50 rows exceeds the 8 KB row-matrix
+// budget but the parent HN still has room for the per-row varlen
+// payloads (Subject, DisplayTo, ...) that HIDs in the promoted row
+// matrix reference. This is the ceiling of single-page HN: real
+// Outlook mailboxes go further by spanning the parent HN across
+// multiple blocks ("multi-page HN" per [MS-PST] §2.3.1.4) — that's
+// deferred to M10 hardening. Today's promotion path lifts the
+// per-folder cap from ~25 messages to ~70 messages.
+// ----------------------------------------------------------------------------
+TEST_CASE("M7 writeM7Pst: 50-message folder forces TC row-matrix subnode promotion",
+          "[m7][phase_e][end_to_end][m7_tc_overflow]")
+{
+    M7PstConfig cfg;
+    cfg.path = "m7_tc_overflow.pst";
+    cfg.providerUid = {{
+        0x22, 0x9D, 0xB5, 0x0A, 0xDC, 0xD9, 0x94, 0x43,
+        0x85, 0xDE, 0x90, 0xAE, 0xB0, 0x7D, 0x12, 0x70,
+    }};
+    cfg.pstDisplayName = "M7 TC Overflow";
+
+    constexpr int kMessageCount = 50;
+    vector<graph::GraphMessage> messages;
+    messages.reserve(kMessageCount);
+    for (int i = 0; i < kMessageCount; ++i) {
+        messages.push_back(makePlainTextMessage(i + 1));
+    }
+
+    M7Folder inbox;
+    inbox.displayName = "Inbox";
+    inbox.parentNid   = Nid{0x00008022u};
+    for (auto& m : messages) inbox.messages.push_back(&m);
+
+    cfg.folders = { inbox };
+
+    const auto r = writeM7Pst(cfg);
+    INFO(r.message);
+    REQUIRE(r.ok);
+
+    // pst_info must accept the file (CRCs, NBT/BBT walk, AMap bid==ib,
+    // etc.). The TC row-matrix subnode lives in the contentsNid's
+    // subnode tree; pst_info walks every block so a malformed XBLOCK
+    // chain or SLBLOCK would surface here.
+    const int rc = runPstInfo(cfg.path);
+    REQUIRE(rc == 0);
+
+    std::remove(cfg.path.c_str());
+}
+
+// ----------------------------------------------------------------------------
+// Phase 1 (#2) regression: a message with a body bigger than one data
+// block (8176 bytes) forces the body subnode through the XBLOCK
+// chaining path in schedulePayload. Without chaining, buildDataBlock
+// would either truncate or throw.
+// ----------------------------------------------------------------------------
+TEST_CASE("M7 writeM7Pst: 50KB body forces XBLOCK chaining of subnode payload",
+          "[m7][phase_e][end_to_end][m7_xblock_chain]")
+{
+    M7PstConfig cfg;
+    cfg.path = "m7_xblock_chain.pst";
+    cfg.providerUid = {{
+        0x22, 0x9D, 0xB5, 0x0A, 0xDC, 0xD9, 0x94, 0x43,
+        0x85, 0xDE, 0x90, 0xAE, 0xB0, 0x7D, 0x12, 0x70,
+    }};
+    cfg.pstDisplayName = "M7 XBLOCK Chain";
+
+    graph::GraphMessage big;
+    big.id                   = "big-1";
+    big.subject              = "Newsletter";
+    big.body.contentType     = graph::BodyType::Text;
+    // 50 KB body — plain text gets HN-promoted by buildMailPc when
+    // > kHnAllocMax (3580 B); the resulting subnode payload is 50 KB
+    // and must be chunked into ~7 data blocks under one XBLOCK.
+    big.body.content.assign(50 * 1024, 'A');
+    big.createdDateTime      = "2024-06-01T12:00:00Z";
+    big.lastModifiedDateTime = "2024-06-01T12:01:00Z";
+    big.sentDateTime         = "2024-06-01T12:00:05Z";
+    big.receivedDateTime     = "2024-06-01T12:00:10Z";
+    big.internetMessageId    = "<big-1@example.com>";
+    big.importance           = graph::Importance::Normal;
+    big.isRead               = false;
+
+    big.sender.name    = "Alice";
+    big.sender.address = "alice@example.com";
+    big.hasSender      = true;
+    big.from           = big.sender;
+    big.hasFrom        = true;
+
+    M7Folder inbox;
+    inbox.displayName = "Inbox";
+    inbox.parentNid   = Nid{0x00008022u};
+    inbox.messages.push_back(&big);
+
+    cfg.folders = { inbox };
+
+    const auto r = writeM7Pst(cfg);
+    INFO(r.message);
+    REQUIRE(r.ok);
+
+    const int rc = runPstInfo(cfg.path);
+    REQUIRE(rc == 0);
+
+    std::remove(cfg.path.c_str());
+}
