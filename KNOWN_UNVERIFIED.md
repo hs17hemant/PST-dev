@@ -608,6 +608,148 @@ User to re-run scanpst.exe on `m11j_mail.pst` to confirm:
 - "Receive folder table missing" → 0
 - "free alloc count doesn't match" → 0
 
+### M11-K — Tier 5: PR_SEARCH_KEY, PR_ATTACH_SIZE, RFT schema, Outgoing Queue, NameId stubs, BBT cRef
+
+**Status: FIXED — 6 priorities landed. Real-Outlook open verdict pending.**
+
+After M11-J cleared the structural blockers, scanpst.exe on
+`m11j_mail.pst` reported six remaining real bugs (Outlook still
+showed "Outlook Data File Corruption" dialog). All addressed in
+this commit.
+
+#### P1 — PidTagSearchKey on every message PC (0x300B0102)
+
+```
+!!Message (nid=8004): Missing PR_SEARCH_KEY
+!!Message (nid=8024): Missing PR_SEARCH_KEY
+```
+
+Per [MS-OXCMSG] §2.2.1.4, every IPM.* message MUST carry
+PR_SEARCH_KEY (16-byte deterministic binary). Outlook uses it for
+conversation tracking and duplicate detection.
+
+Fix: new
+[graph::deriveMessageSearchKey](src/graph_convert.cpp) emits a
+deterministic 16-byte hash via two-pass FNV-1a 64-bit (different
+offset bases). Stable across builds; not cryptographic.
+[src/mail.cpp `buildMailPc`](src/mail.cpp) seeds with
+`internetMessageId` when present, else `subject + sentDateTime`.
+
+#### P2 — PidTagAttachSize fallback when Graph reports 0 (0x0E200003)
+
+```
+!!Attachment (nid=25) missing or invalid PR_ATTACH_SIZE
+```
+
+Graph payloads sometimes report `attachment.size == 0` (especially
+for inline attachments synthesized from base64 contentBytes).
+[src/mail.cpp `buildAttachmentPc`](src/mail.cpp) now falls back to
+`contentBytes.size() + 512 metadata overhead` whenever
+`att.size == 0`, ensuring scanpst sees a non-zero PR_ATTACH_SIZE.
+
+#### P3 — Receive Folder Table proper schema
+
+```
+!!Receive folder table missing
+!!Receive folder table missing default message class
+```
+
+M11-I G shipped NID 0x617 with the WRONG schema (LtpRowId-as-NID +
+DisplayName_W). Per [MS-OXCSTOR] §2.2.4 + [MS-OXCDATA] §2.2.4.2 the
+RFT schema is:
+- `0x001A001F` PidTagMessageClass_W (key column)
+- `0x36670102` PidTagReceiveFolderID (24-byte ENTRYID)
+- `0x30080040` PidTagLastModificationTime
+- LtpRowId / LtpRowVer
+
+[src/messaging.cpp `buildReceiveFolderTableTc`](src/messaging.cpp)
+rebuilds with the correct 5-column schema, emits one default-class
+row mapping `""` → ENTRYID(IPM Subtree NID 0x8022). Per-row size
+25 bytes (4×4 + 8 + 1 CEB).
+
+#### P4 — Outgoing Queue / Search Contents Template (NID 0x610)
+
+```
+!!TC (nid=610) missing required column (67F10003)
+!!TC (nid=610) missing required column (0E05001F)
+!!TC (nid=610) missing required column (0E2A000B)
+```
+
+Previously delegated to `buildFolderContentsTc` (28 cols) — wrong
+schema for NID 0x610 and missing the three search-specific
+columns. Replaced with a dedicated 20-column schema:
+
+| Tag | Type | ibData | iBit | Notes |
+|---|---|---|---|---|
+| 0x67F1 | Int32 | 68 | 19 | PR_PF_PROXY (M11-K NEW) |
+| 0x0E05 | Unicode | 64 | 16 | PR_PARENT_ENTRYID_W (M11-K NEW) |
+| 0x0E2A | Boolean | 74 | 17 | PR_HASATTACH (M11-K NEW) |
+| (+17 standard message-table columns) | | | | |
+
+`endBm = 78`. Per-row size 78 bytes.
+
+#### P5 — Name-to-Id Map non-empty stubs
+
+```
+!!PC (nid=61, prop=00020102) invalid HNID (60)
+!!PC (nid=61, prop=00030102) invalid HNID (80)
+!!PC (nid=61, prop=00040102) invalid HNID (A0)
+```
+
+Earlier `buildNameToIdMapPc` emitted the three stream Binary
+properties (StreamGuid, StreamEntry, StreamString) with 0-byte
+values. Outlook's parser rejects an HNID pointing at a 0-byte HN
+allocation — even though rgibAlloc represents it correctly,
+scanpst calls it "invalid".
+
+Fix: emit non-empty stub buffers:
+- `0x0002 StreamGuid`: 16 zero bytes (1 stub GUID slot)
+- `0x0003 StreamEntry`: 8 zero bytes (1 stub entry slot)
+- `0x0004 StreamString`: 4 zero bytes
+
+All zeros — semantically still an empty NameId map (no real
+entries), but the HN allocations are non-empty so scanpst can
+resolve their HIDs.
+
+#### P6 — BBT entry cRef 1 → 2
+
+```
+!!BBT entry (4) has different refcount in RBT (1 vs 2)
+... (38 entries, all `!!` errors in Outlook 16 strict mode)
+```
+
+Aspose-produced PSTs have `cRef = 2` on every BBT entry. We
+emitted `cRef = 1`. Earlier this was a `??` warning (cosmetic);
+Outlook 16.0.19929 promoted it to `!!` error.
+
+[src/writer.cpp](src/writer.cpp): both `buildAndWriteBlocksPst` (M3
+path) and `writeM5Pst` (M5+ path) now set `cRef = 2u` per BBT
+entry. pst_info on the regenerated PST confirms all 38 BBT entries
+have cRef=2.
+
+**Verification**:
+```
+test cases:  233 |  231 passed | 2 skipped
+assertions: 5650 | 5650 passed
+```
+
+Fresh `m11k_mail.pst` ready at `.tmp/m11k_mail.pst`. pst_info ALL
+CHECKS PASSED including M11-J `bidSub→BBT` cross-check. NBT walk
+confirms NID 0x617 (Receive Folder Table) emitted, NID 0x61
+(NameToIdMap) HNPAGEMAP cFree=0 (was 3).
+
+User to re-run scanpst.exe on `m11k_mail.pst`. Expected:
+- "Items needing repair" → 0 (P1 + P2 cascade clears row mismatches)
+- "missing PR_SEARCH_KEY" → 0
+- "missing PR_ATTACH_SIZE" → 0
+- "Receive folder table missing" → 0
+- "TC (nid=610) missing required column" → 0
+- "PC (nid=61) invalid HNID" → 0
+- "BBT entry has different refcount" → 0
+
+If real Outlook opens cleanly without the corruption dialog, M10
+mail-only ship gate is achieved.
+
 ### M11-F — Show-stoppers from external code review (TC overflow / XBLOCK chaining / buffer aliasing / RowVer)
 
 **Status: FIXED (4 of 21 review items). 17 remaining items deferred to M10+.**

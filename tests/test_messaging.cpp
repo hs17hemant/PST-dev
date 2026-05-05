@@ -719,16 +719,27 @@ TEST_CASE("buildNameToIdMapPc emits the 4 well-known empty-state properties",
         REQUIRE(p->inlineValue == 251u);
     }
 
-    SECTION("3 stream properties (0x0002 / 0x0003 / 0x0004) — empty PtypBinary")
+    SECTION("3 stream properties (0x0002 / 0x0003 / 0x0004) — non-empty stub PtypBinary (M11-K P5)")
     {
-        const uint16_t streamTags[3] = { 0x0002u, 0x0003u, 0x0004u };
-        for (const uint16_t tag : streamTags) {
-            const auto* p = findProp(props, tag);
-            INFO("Stream PidTag = 0x" << std::hex << tag);
+        // M11-K P5: stream values are now non-empty stubs (16/8/4 bytes
+        // of zeros) so scanpst can resolve their HNIDs. Each value is
+        // still semantically "empty" (all-zero bytes = empty NameId map).
+        const struct { uint16_t tag; size_t expected; } expected[3] = {
+            { 0x0002u, 16u },  // StreamGuid stub
+            { 0x0003u,  8u },  // StreamEntry stub
+            { 0x0004u,  4u },  // StreamString stub
+        };
+        for (const auto& e : expected) {
+            const auto* p = findProp(props, e.tag);
+            INFO("Stream PidTag = 0x" << std::hex << e.tag);
             REQUIRE(p != nullptr);
             REQUIRE(static_cast<uint16_t>(p->propType) == 0x0102u);
             REQUIRE(p->storage  == ReadPcProp::Storage::HnAlloc);
-            REQUIRE(p->valueSize == 0u);
+            REQUIRE(p->valueSize == e.expected);
+            // Values are zero-byte stubs.
+            for (size_t i = 0; i < p->valueSize; ++i) {
+                REQUIRE(p->valueBytes[i] == 0u);
+            }
         }
     }
 }
@@ -817,10 +828,9 @@ TEST_CASE("buildAttachmentTemplateTc emits 6-column empty Attachment Template",
 }
 
 // ============================================================================
-// M6.9 — Search Contents Template (0x0610). KNOWN_UNVERIFIED: best-effort
-// shares the Contents Template schema. Test confirms it's a structurally
-// valid empty TC; full schema validation pinned by the
-// `[m6][contents_tc_3_12]` test.
+// M6.9 — Search Contents Template (0x0610). M11-K P4: now uses a
+// dedicated 20-column schema (was: shared with Contents). Includes
+// search-specific columns 0x67F1, 0x0E05, 0x0E2A required by scanpst.
 // ============================================================================
 TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
           "[m6][search_contents_tc]")
@@ -831,7 +841,7 @@ TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
     REQUIRE(hn[3] == 0x7Cu);
     const uint16_t ibHnpm = detail::readU16(hn, 0);
     const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
-    REQUIRE(hn[tciOff + 1] == 0x1Cu);   // cCols = 28 (matches Contents post-M11-I)
+    REQUIRE(hn[tciOff + 1] == 0x14u);   // cCols = 20 (M11-K P4: dedicated Search Contents schema)
     REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);
 }
 

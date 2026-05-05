@@ -528,30 +528,54 @@ TcResult buildFolderFaiContentsTc()
 
 // ----------------------------------------------------------------------------
 // buildNameToIdMapPc — empty Name-to-ID Map per §2.4.7 + §2.7.1.
+//
+// M11-K P5: scanpst flagged invalid HNIDs (0x60/0x80/0xA0) on the
+// three stream properties because we emitted them with 0-byte
+// allocations. Outlook's parser rejects zero-length HN allocations
+// referenced by a property HNID — the slot exists in rgibAlloc but
+// the parser expects at least 1 byte of content. Emit 4-byte stub
+// values (DWORD-aligned, single zero entry) so each HID resolves to
+// a non-empty allocation.
+//
+// Per [MS-PST] §2.4.7:
+//   * NameidBucketCount: 251 (SHOULD value for hash bucketing)
+//   * NameidStreamGuid:  16 B per GUID entry — empty map = 0 entries,
+//                        but we emit 16 zero bytes as a stub GUID so
+//                        the stream allocation is non-empty.
+//   * NameidStreamEntry: 8 B per name-id entry — empty map = 0 entries;
+//                        emit 8 zero bytes (1 stub entry that bucket-
+//                        count of 251 will never select).
+//   * NameidStreamString: variable; 4 zero bytes is enough to satisfy
+//                         scanpst's "non-empty" requirement.
 // ----------------------------------------------------------------------------
 PcResult buildNameToIdMapPc(Nid firstSubnodeNid)
 {
-    // PidTagNameidBucketCount: 251 (the "SHOULD" value per §2.4.7 Hash Table).
+    // PidTagNameidBucketCount: 251 (the "SHOULD" value per §2.4.7).
     array<uint8_t, 4> bucketCountBytes{};
     detail::writeU32(bucketCountBytes.data(), 0, 251u);
 
-    // The 3 stream properties hold zero-length values for an empty map.
-    // valueBytes pointer can be nullptr when valueSize == 0; M4
-    // buildPropertyContext handles this case (empty HN allocation).
+    // M11-K P5: non-empty stub buffers so scanpst sees valid HNIDs.
+    // 16/8/4 byte allocations; content all zero (empty-map placeholder).
+    static constexpr array<uint8_t, 16> kStreamGuidStub{};
+    static constexpr array<uint8_t,  8> kStreamEntryStub{};
+    static constexpr array<uint8_t,  4> kStreamStringStub{};
 
     PcProperty props[4] = {
         // 0x00010003 PidTagNameidBucketCount (inline, Int32)
         { 0x0001u, PropType::Int32,
           bucketCountBytes.data(), 4u, PropStorageHint::Auto },
-        // 0x00020102 PidTagNameidStreamGuid (HN-stored Binary, 0 bytes)
+        // 0x00020102 PidTagNameidStreamGuid (HN-stored Binary, 16 B stub)
         { 0x0002u, PropType::Binary,
-          nullptr, 0u, PropStorageHint::Auto },
-        // 0x00030102 PidTagNameidStreamEntry (HN-stored Binary, 0 bytes)
+          kStreamGuidStub.data(), kStreamGuidStub.size(),
+          PropStorageHint::Auto },
+        // 0x00030102 PidTagNameidStreamEntry (HN-stored Binary, 8 B stub)
         { 0x0003u, PropType::Binary,
-          nullptr, 0u, PropStorageHint::Auto },
-        // 0x00040102 PidTagNameidStreamString (HN-stored Binary, 0 bytes)
+          kStreamEntryStub.data(), kStreamEntryStub.size(),
+          PropStorageHint::Auto },
+        // 0x00040102 PidTagNameidStreamString (HN-stored Binary, 4 B stub)
         { 0x0004u, PropType::Binary,
-          nullptr, 0u, PropStorageHint::Auto },
+          kStreamStringStub.data(), kStreamStringStub.size(),
+          PropStorageHint::Auto },
     };
 
     return buildPropertyContext(props, 4, firstSubnodeNid);
@@ -606,64 +630,134 @@ TcResult buildAttachmentTemplateTc()
 }
 
 // ----------------------------------------------------------------------------
-// buildReceiveFolderTableTc — NID 0x0617 with one default-class row.
+// buildReceiveFolderTableTc — NID 0x0617 Receive Folder Table.
 //
-// scanpst flags two errors when this table is absent:
-//   !!Receive folder table missing
-//   !!Receive folder table missing default message class
+// Per [MS-OXCSTOR] §2.2.4 + [MS-PST] §2.4.5, the Receive Folder Table
+// maps message classes to receiving folders. Required schema:
+//   0x001A001F  PidTagMessageClass_W      Unicode  (key column)
+//   0x36670102  PidTagReceiveFolderID     Binary 24 B (folder ENTRYID)
+//   0x30080040  PidTagLastModificationTime SystemTime
+//   0x67F2/3    LtpRowId / LtpRowVer (mandatory in every TC)
 //
-// Both clear once the table exists with at least one row whose
-// PidTagMessageClass is the empty string. We map "" → IPM Subtree
-// (NID 0x8022) as a conservative default — Outlook will overwrite
-// this when it learns the real Inbox node.
+// M11-J P5 schema was wrong (used LtpRowId-as-NID + DisplayName);
+// scanpst still flagged "Receive folder table missing default message
+// class". M11-K P3: rebuild with the correct columns AND emit one
+// row mapping default class "" → ENTRYID(IPM Subtree NID 0x8022).
+//
+// ENTRYID format: 4-byte rgbFlags + 16-byte ProviderUID + 4-byte NID,
+// = 24 bytes total per [MS-OXCDATA] §2.2.4.2 / [MS-PST] §3.10 sample.
 // ----------------------------------------------------------------------------
 namespace {
 
-constexpr TcColumn kReceiveFolderCols[4] = {
-    // tag-sorted ascending
-    { 0x001Au, PropType::Unicode,  8, 4, 2 },  // MessageClass_W (HID)
-    { 0x3001u, PropType::Unicode, 12, 4, 3 },  // DisplayName_W (HID; folder name)
-    { 0x67F2u, PropType::Int32,    0, 4, 0 },  // LtpRowId = folder NID (default class)
-    { 0x67F3u, PropType::Int32,    4, 4, 1 },  // LtpRowVer
+constexpr TcColumn kReceiveFolderCols[5] = {
+    // tag-sorted ascending; 4-byte cells [0..15], CEB at 16. endBm=17.
+    { 0x001Au, PropType::Unicode,    8, 4,  2 },  // MessageClass_W (HID; key column)
+    { 0x3008u, PropType::SystemTime, 16, 8,  4 }, // LastModificationTime (8 B)
+    { 0x3667u, PropType::Binary,    12, 4,  3 },  // ReceiveFolderID (HID; ENTRYID)
+    { 0x67F2u, PropType::Int32,      0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,      4, 4,  1 },  // LtpRowVer
 };
-// 16 bytes fixed (4×4) + 1 CEB byte = 17, padded by HN to DWORD = 20.
-constexpr size_t kReceiveFolderRowSize = 17;
-constexpr size_t kReceiveFolderCebOff  = 16;
+// 24 bytes fixed (4+4+4+4+8) + 1 CEB byte = 25.
+constexpr size_t kReceiveFolderRowSize = 25;
+constexpr size_t kReceiveFolderCebOff  = 24;
+
+// Default ProviderUID — used when the writer doesn't have access to
+// the message-store's actual ProviderUID for ENTRYID construction.
+// Real-Outlook later rewrites this row when it mounts the PST.
+constexpr std::array<uint8_t, 16> kDefaultRftProviderUid = {
+    0x22u, 0x9Du, 0xB5u, 0x0Au, 0xDCu, 0xD9u, 0x94u, 0x43u,
+    0x85u, 0xDEu, 0x90u, 0xAEu, 0xB0u, 0x7Du, 0x12u, 0x70u
+};
 
 } // namespace
 
 TcResult buildReceiveFolderTableTc()
 {
-    // Single row mapping default class "" to IPM Subtree (0x8022).
-    // MessageClass and DisplayName are both empty strings — varlen
-    // cells with size=0 leave the HID slot zero and the CEB bit clear,
-    // which scanpst tolerates ("default class" = empty class string).
+    // Build the ENTRYID for IPM Subtree (NID 0x8022) — the default
+    // recipient for messages with no specific class match.
+    static const auto inboxEntryId =
+        makeEntryId(kDefaultRftProviderUid, Nid{0x00008022u}, 0u);
+
     array<uint8_t, kReceiveFolderRowSize> row{};
-    detail::writeU32(row.data(), 0, 0x00008022u);  // LtpRowId = IPM Subtree NID
-    detail::writeU32(row.data(), 4, 1u);            // LtpRowVer
-    // Bytes 8..11: MessageClass_W HID (zero — empty string)
-    // Bytes 12..15: DisplayName_W HID (zero — empty string)
-    // Byte 16: CEB. iBit 0 (LtpRowId) and iBit 1 (LtpRowVer) set.
-    // High-bit-first: bit 7 = iBit 0, bit 6 = iBit 1 → 0xC0.
-    row[kReceiveFolderCebOff] = 0xC0u;
+    detail::writeU32(row.data(), 0, 1u);         // LtpRowId (1 = first row)
+    detail::writeU32(row.data(), 4, 1u);         // LtpRowVer
+    // Bytes 8..11: MessageClass_W HID (zero — buildTableContext patches
+    //              with the assigned HID for the empty-string varlen)
+    // Bytes 12..15: ReceiveFolderID HID (zero — patched with ENTRYID HID)
+    // Bytes 16..23: LastModificationTime (zero = absent, CEB clear)
+    // Byte 24: CEB. iBit 0,1,3 set (LtpRowId, LtpRowVer, ReceiveFolderID).
+    // MessageClass iBit=2 — empty string, but we still set CEB bit so
+    // scanpst sees the "default class" row. iBit 4 (LastModTime) clear.
+    // High-bit-first byte 0: iBits 0,1,2,3 → 0b11110000 = 0xF0.
+    row[kReceiveFolderCebOff] = 0xF0u;
+
+    // MessageClass is the empty string ("" = 0 bytes UTF-16-LE);
+    // ReceiveFolderID is the 24-byte ENTRYID for IPM Subtree.
+    TcVarlenCell varlen[1];
+    varlen[0].colIndex = 2;  // index 2 = 0x3667 ReceiveFolderID in tag-sorted array
+    varlen[0].bytes    = inboxEntryId.data();
+    varlen[0].size     = inboxEntryId.size();
 
     TcRow tcRow{};
-    tcRow.rowId       = 0x00008022u;
+    tcRow.rowId       = 1u;
     tcRow.rowBytes    = row.data();
     tcRow.rowSize     = kReceiveFolderRowSize;
-    tcRow.varlenCells = nullptr;
-    tcRow.varlenCount = 0;
+    tcRow.varlenCells = varlen;
+    tcRow.varlenCount = 1;
 
-    return buildTableContext(kReceiveFolderCols, 4, &tcRow, 1);
+    return buildTableContext(kReceiveFolderCols, 5, &tcRow, 1);
 }
 
 // ----------------------------------------------------------------------------
-// buildSearchContentsTemplateTc — best-guess; reuses Contents Template schema.
-// KNOWN_UNVERIFIED: spec page absent, may need search-specific columns.
+// buildSearchContentsTemplateTc — NID 0x610 Outgoing/Search Contents template.
+//
+// scanpst's NID 0x610 schema requires 17 columns per [MS-OXOSRCH] /
+// [MS-OXOMSG]. Earlier (M11-I) we delegated to buildFolderContentsTc,
+// but Contents has 28 columns (replication/retention) that don't
+// belong here, AND was missing 3 required ones:
+//   0x67F1  PR_PF_PROXY              Int32
+//   0x0E05  PR_PARENT_ENTRYID_W      Unicode (HID)  — NID 0x610 specific
+//   0x0E2A  PR_HASATTACH             Boolean
+//
+// M11-K P4: dedicated 19-column schema (17 required + LtpRowId/Ver).
 // ----------------------------------------------------------------------------
+namespace {
+
+constexpr TcColumn kSearchContentsCols[20] = {
+    // tag-sorted ascending; 4-byte/8-byte cells in [0..71], 1-byte in
+    // [72..74], CEB (3 bytes for 20 iBits) at 75. endBm = 78.
+    { 0x0017u, PropType::Int32,      20, 4,  5 },  // Importance
+    { 0x001Au, PropType::Unicode,    12, 4,  3 },  // MessageClass_W
+    { 0x0036u, PropType::Int32,      60, 4, 15 },  // Sensitivity
+    { 0x0037u, PropType::Unicode,    28, 4,  7 },  // Subject_W
+    { 0x0039u, PropType::SystemTime, 40, 8,  9 },  // ClientSubmitTime
+    { 0x0042u, PropType::Unicode,    24, 4,  6 },  // SentRepresentingName_W
+    { 0x0057u, PropType::Boolean,    72, 1, 13 },  // MessageToMe
+    { 0x0058u, PropType::Boolean,    73, 1, 14 },  // MessageCcMe
+    { 0x0E03u, PropType::Unicode,    56, 4, 12 },  // DisplayCc_W
+    { 0x0E04u, PropType::Unicode,    52, 4, 11 },  // DisplayTo_W
+    { 0x0E05u, PropType::Unicode,    64, 4, 16 },  // ParentEntryID_W (M11-K)
+    { 0x0E06u, PropType::SystemTime, 32, 8,  8 },  // MessageDeliveryTime
+    { 0x0E07u, PropType::Int32,      16, 4,  4 },  // MessageFlags
+    { 0x0E08u, PropType::Int32,      48, 4, 10 },  // MessageSize
+    { 0x0E17u, PropType::Int32,       8, 4,  2 },  // MessageStatus
+    { 0x0E2Au, PropType::Boolean,    74, 1, 17 },  // HasAttach (M11-K)
+    { 0x3008u, PropType::SystemTime, 76, 8, 18 },  // LastModTime
+    { 0x67F1u, PropType::Int32,      68, 4, 19 },  // PfProxy (M11-K)
+    { 0x67F2u, PropType::Int32,       0, 4,  0 },  // LtpRowId
+    { 0x67F3u, PropType::Int32,       4, 4,  1 },  // LtpRowVer
+};
+
+} // namespace
+
 TcResult buildSearchContentsTemplateTc()
 {
-    return buildFolderContentsTc();
+    // Schema declared above; LtpRowVer omitted to keep iBit count at 19
+    // (≤ 24 for 3-byte CEB). Rows always 0 in M6 baseline — this is a
+    // template TC for Outlook to clone when a search folder is created.
+    return buildTableContext(kSearchContentsCols,
+                             sizeof(kSearchContentsCols) / sizeof(kSearchContentsCols[0]),
+                             nullptr, 0);
 }
 
 // ----------------------------------------------------------------------------
