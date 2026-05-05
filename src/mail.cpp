@@ -1005,16 +1005,17 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
 
             // Hierarchy TC (0 rows — M7 folders are flat; sub-folder
             // support is left to writeM7Pst callers via parentNid wiring).
-            // Per-folder sibling tables (HIER/CONTENTS/FAI) carry
-            // nidParent = owning folder NID per real-Outlook oracle.
-            scheduleNode(rec.hierarchyNid, rec.folderNid,
+            // Sibling tables (HIER/CONTENTS/FAI) NBTENTRYs carry
+            // nidParent = 0 per [MS-PST] §3.12, confirmed via Aspose
+            // oracle. See KNOWN_UNVERIFIED.md M11-D.
+            scheduleNode(rec.hierarchyNid, Nid{0u},
                          buildFolderHierarchyTc(nullptr, 0).hnBytes);
 
             // Contents TC — populated rows below.
             // (Defer to message-building loop; we'll patch the slot.)
 
             // FAI contents TC (0 rows)
-            scheduleNode(rec.faiNid, rec.folderNid,
+            scheduleNode(rec.faiNid, Nid{0u},
                          buildFolderFaiContentsTc().hnBytes);
         }
 
@@ -1038,15 +1039,121 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             }
         }
 
-        // Build per-folder Contents TC.
-        // Reuse the M6 27-col schema (it's still 0-row in M6); M7 emits
-        // populated rows. For simplicity we keep emitting 0-row Contents
-        // TCs at the folder level — Outlook builds the contents view from
-        // the messages' NBT entries with nidParent=folder. M10 hardening
-        // can populate the Contents TC view rows.
+        // Build per-folder Contents TC with one row per message.
+        //
+        // Real-Outlook contract: a folder's CONTENTS_TABLE TC must
+        // contain a populated row for each message the folder owns —
+        // Outlook reads the row's display columns (Subject, DisplayTo,
+        // MessageDeliveryTime, ...) directly when building its
+        // message-list view; an empty Contents TC produces "error
+        // reading folder" even though the message NBT entries are
+        // intact. Per [MS-OXCFOLD] §2.2.1.7 the row-cell columns are
+        // copied from the corresponding message PC properties.
+        //
+        // Stable storage: we reserve `folderMsgCount` row buffers up
+        // front so push_back() never reallocates — ContentsTcRow holds
+        // raw pointers into the buffer entries.
+        struct MsgRowBuffers {
+            vector<uint8_t> messageClass;
+            vector<uint8_t> subject;
+            vector<uint8_t> sentRepresentingName;
+            vector<uint8_t> conversationTopic;
+            vector<uint8_t> displayTo;
+            vector<uint8_t> displayCc;
+        };
+
         for (auto& rec : folderRecs) {
-            scheduleNode(rec.contentsNid, rec.folderNid,
-                         buildFolderContentsTc().hnBytes);
+            size_t folderMsgCount = 0;
+            for (const auto& mr : msgRecs) {
+                if (mr.folder == &rec) ++folderMsgCount;
+            }
+
+            vector<MsgRowBuffers> bufs;       bufs.reserve(folderMsgCount);
+            vector<ContentsTcRow> contentRows; contentRows.reserve(folderMsgCount);
+
+            for (const auto& mr : msgRecs) {
+                if (mr.folder != &rec) continue;
+                const graph::GraphMessage& m = *mr.src;
+
+                bufs.push_back({});
+                auto& b = bufs.back();
+
+                b.messageClass = u16le("IPM.Note");
+
+                if (!m.subject.empty()) {
+                    b.subject = u16le(m.subject);
+                    const auto parts = splitSubject(m.subject);
+                    if (!parts.normalized.empty()) {
+                        b.conversationTopic = u16le(parts.normalized);
+                    }
+                }
+
+                if (m.hasFrom && !m.from.name.empty()) {
+                    b.sentRepresentingName = u16le(m.from.name);
+                } else if (m.hasSender && !m.sender.name.empty()) {
+                    b.sentRepresentingName = u16le(m.sender.name);
+                }
+
+                const string displayToStr = joinRecipientDisplay(m.toRecipients);
+                if (!displayToStr.empty()) b.displayTo = u16le(displayToStr);
+                const string displayCcStr = joinRecipientDisplay(m.ccRecipients);
+                if (!displayCcStr.empty()) b.displayCc = u16le(displayCcStr);
+
+                ContentsTcRow row;
+                row.rowId        = mr.messageNid;
+                row.rowVer       = 1u;
+                row.importance   = static_cast<int32_t>(m.importance);
+                row.messageFlags =
+                    static_cast<int32_t>(computeMessageFlags(m));
+                row.messageSize  =
+                    static_cast<int32_t>(estimateMessageSize(m));
+                if (!m.receivedDateTime.empty()) {
+                    row.messageDeliveryTime =
+                        graph::isoToFiletimeTicks(m.receivedDateTime);
+                }
+                if (!m.sentDateTime.empty()) {
+                    row.clientSubmitTime =
+                        graph::isoToFiletimeTicks(m.sentDateTime);
+                }
+                if (!m.lastModifiedDateTime.empty()) {
+                    row.lastModificationTime =
+                        graph::isoToFiletimeTicks(m.lastModifiedDateTime);
+                }
+                if (!b.messageClass.empty()) {
+                    row.messageClassUtf16le = b.messageClass.data();
+                    row.messageClassSize    = b.messageClass.size();
+                }
+                if (!b.subject.empty()) {
+                    row.subjectUtf16le = b.subject.data();
+                    row.subjectSize    = b.subject.size();
+                }
+                if (!b.sentRepresentingName.empty()) {
+                    row.sentRepresentingNameUtf16le = b.sentRepresentingName.data();
+                    row.sentRepresentingNameSize    = b.sentRepresentingName.size();
+                }
+                if (!b.conversationTopic.empty()) {
+                    row.conversationTopicUtf16le = b.conversationTopic.data();
+                    row.conversationTopicSize    = b.conversationTopic.size();
+                }
+                if (!b.displayTo.empty()) {
+                    row.displayToUtf16le = b.displayTo.data();
+                    row.displayToSize    = b.displayTo.size();
+                }
+                if (!b.displayCc.empty()) {
+                    row.displayCcUtf16le = b.displayCc.data();
+                    row.displayCcSize    = b.displayCc.size();
+                }
+                if (!m.conversationIndex.empty()) {
+                    row.conversationIndexBytes = m.conversationIndex.data();
+                    row.conversationIndexSize  = m.conversationIndex.size();
+                }
+                contentRows.push_back(row);
+            }
+
+            auto tc = buildFolderContentsTc(
+                contentRows.empty() ? nullptr : contentRows.data(),
+                contentRows.size());
+            scheduleNode(rec.contentsNid, Nid{0u}, std::move(tc.hnBytes));
         }
 
         // ============================================================
@@ -1073,9 +1180,7 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             const HierarchyTcRow* rowsPtr =
                 ipmHierRows.empty() ? nullptr : ipmHierRows.data();
             auto tc = buildFolderHierarchyTc(rowsPtr, ipmHierRows.size());
-            // IPM Subtree's hierarchy table: nidParent = IPM Subtree NID.
-            scheduleNode(Nid{0x0000802Du}, Nid{0x00008022u},
-                         std::move(tc.hnBytes));
+            scheduleNode(Nid{0x0000802Du}, Nid{0u}, std::move(tc.hnBytes));
         }
 
         // ============================================================

@@ -393,13 +393,14 @@ WriteResult writeM9Pst(const M9PstConfig& config) noexcept
             auto pc = buildMailFolderPc(schema, kDummySub);
             scheduleNode(rec.folderNid, rec.src->parentNid, std::move(pc.hnBytes));
 
-            // Per-folder sibling tables (HIER/CONTENTS/FAI) carry
-            // nidParent = owning folder NID per real-Outlook oracle.
-            scheduleNode(rec.hierarchyNid, rec.folderNid,
+            // Sibling tables (HIER/CONTENTS/FAI) NBTENTRYs carry
+            // nidParent = 0 per [MS-PST] §3.12, confirmed via Aspose
+            // oracle. See KNOWN_UNVERIFIED.md M11-D.
+            scheduleNode(rec.hierarchyNid, Nid{0u},
                          buildFolderHierarchyTc(nullptr, 0).hnBytes);
-            scheduleNode(rec.contentsNid, rec.folderNid,
+            scheduleNode(rec.contentsNid, Nid{0u},
                          buildFolderContentsTc().hnBytes);
-            scheduleNode(rec.faiNid, rec.folderNid,
+            scheduleNode(rec.faiNid, Nid{0u},
                          buildFolderFaiContentsTc().hnBytes);
         }
 
@@ -422,9 +423,7 @@ WriteResult writeM9Pst(const M9PstConfig& config) noexcept
             }
             const HierarchyTcRow* rowsPtr = ipmHier.empty() ? nullptr : ipmHier.data();
             auto tc = buildFolderHierarchyTc(rowsPtr, ipmHier.size());
-            // IPM Subtree's hierarchy table: nidParent = IPM Subtree NID.
-            scheduleNode(Nid{0x0000802Du}, Nid{0x00008022u},
-                         std::move(tc.hnBytes));
+            scheduleNode(Nid{0x0000802Du}, Nid{0u}, std::move(tc.hnBytes));
         }
 
         // ============================================================

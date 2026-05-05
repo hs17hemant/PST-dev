@@ -99,12 +99,12 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
         rootHier[2].displayNameSize    = nameSearchRoot.size();
         rootHier[2].hasSubfolders      = false;
         auto tc = buildFolderHierarchyTc(rootHier, 3);
-        out.push_back(mkEntry(Nid{0x0000012Du}, Nid{0x00000122u}, std::move(tc.hnBytes)));
+        out.push_back(mkEntry(Nid{0x0000012Du}, Nid{0u}, std::move(tc.hnBytes)));
     }
 
-    // 5-6. Root Contents + FAI Contents (nidParent = Root Folder)
-    out.push_back(mkEntry(Nid{0x0000012Eu}, Nid{0x00000122u}, buildFolderContentsTc().hnBytes));
-    out.push_back(mkEntry(Nid{0x0000012Fu}, Nid{0x00000122u}, buildFolderFaiContentsTc().hnBytes));
+    // 5-6. Root Contents + FAI Contents
+    out.push_back(mkEntry(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc().hnBytes));
+    out.push_back(mkEntry(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes));
 
     // 7-8. Bare nodes
     out.push_back(mkEntry(Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload()));
@@ -148,10 +148,9 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
         auto pc = buildFolderPc(fr, kDummySub);
         out.push_back(mkEntry(Nid{0x00008042u}, Nid{0x00000122u}, std::move(pc.hnBytes)));
     }
-    // Finder's three sibling tables: nidParent = Finder NID
-    out.push_back(mkEntry(Nid{0x0000804Du}, Nid{0x00008042u}, buildFolderHierarchyTc(nullptr, 0).hnBytes));
-    out.push_back(mkEntry(Nid{0x0000804Eu}, Nid{0x00008042u}, buildFolderContentsTc().hnBytes));
-    out.push_back(mkEntry(Nid{0x0000804Fu}, Nid{0x00008042u}, buildFolderFaiContentsTc().hnBytes));
+    out.push_back(mkEntry(Nid{0x0000804Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0).hnBytes));
+    out.push_back(mkEntry(Nid{0x0000804Eu}, Nid{0u}, buildFolderContentsTc().hnBytes));
+    out.push_back(mkEntry(Nid{0x0000804Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes));
 
     // 24. Deleted Items (0x8062; parent = IPM Subtree)
     {
@@ -161,10 +160,9 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
         auto pc = buildFolderPc(di, kDummySub);
         out.push_back(mkEntry(Nid{0x00008062u}, Nid{0x00008022u}, std::move(pc.hnBytes)));
     }
-    // Deleted Items' three sibling tables: nidParent = Deleted Items NID
-    out.push_back(mkEntry(Nid{0x0000806Du}, Nid{0x00008062u}, buildFolderHierarchyTc(nullptr, 0).hnBytes));
-    out.push_back(mkEntry(Nid{0x0000806Eu}, Nid{0x00008062u}, buildFolderContentsTc().hnBytes));
-    out.push_back(mkEntry(Nid{0x0000806Fu}, Nid{0x00008062u}, buildFolderFaiContentsTc().hnBytes));
+    out.push_back(mkEntry(Nid{0x0000806Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0).hnBytes));
+    out.push_back(mkEntry(Nid{0x0000806Eu}, Nid{0u}, buildFolderContentsTc().hnBytes));
+    out.push_back(mkEntry(Nid{0x0000806Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes));
 
     return out;
 }
