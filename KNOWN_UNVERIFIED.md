@@ -869,6 +869,93 @@ User to re-run scanpst.exe + open in real Outlook on
   may persist if scanpst expects different LtpRowId/MessageClass
   encoding (will need Tier 7).
 
+### M11-M — Tier 8: TC row CEB-vs-PC parity (the actual Outlook open blocker)
+
+**Status: STRUCTURAL FIXES VERIFIED via diagnostic decoder. Real-Outlook open verdict pending user.**
+
+User-driven bisection (m11m_simple = 1 msg no attachment, m11m_norft =
+same + no RFT) confirmed **neither attachment nor RFT was the
+real-Outlook open blocker**. The remaining `!!` errors in both logs
+were the same:
+
+```
+!!Contents Table for 8002, row doesn't match sub-object: irow = 0, RowID = 8004
+!!Hierarchy Table for 8022, row doesn't match sub-object: irow = 0, RowID = 8002
+```
+
+That meant the row-vs-sub-object mismatch was the actual blocker, not
+the noise we'd been chasing.
+
+**Diagnostic methodology**: rather than speculate, wrote a Python
+decoder (`.tmp/diff_tc_pc.py`) that walks the encrypted PST, decrypts
+each block, parses the TC HN at one NID and the PC HN at another, and
+prints a side-by-side comparison of every TC column value vs the
+corresponding PC property. For `m11m_simple.pst`:
+
+```
+Bisection #1: Inbox Contents Table 0x800E row 0  vs  Message PC 0x8004
+  tag=0x0E17(0003) iBit=2  CEB=True  -- PC has no 0x0E17     ← MISMATCH
+  tag=0x0036(0003) iBit=15 CEB=True  -- PC has no 0x0036     ← MISMATCH
+  tag=0x0057(000B) iBit=13 CEB=True  -- PC has no 0x0057     ← MISMATCH
+  tag=0x0058(000B) iBit=14 CEB=True  -- PC has no 0x0058     ← MISMATCH
+
+Bisection #2: IPM Subtree Hierarchy 0x802D row 0  vs  Folder PC 0x8002
+  tag=0x0E33(0014) iBit=7  CEB=True  -- PC has no 0x0E33     ← MISMATCH
+  tag=0x3613(001F) iBit=10 CEB=False -- row=00000000  pc=4900500046002e004e006f0074006500   ← MISMATCH (row hides "IPF.Note")
+```
+
+**Root cause**: dual-derivation drift. TC rows derived from Graph
+JSON in `messaging.cpp` set CEB-bits unconditionally (status,
+sensitivity, MessageToMe/CcMe, ReplChangenum) regardless of whether
+`buildMailPc` / `buildMailFolderPc` actually emit the corresponding
+PC property. And vice-versa for ContainerClass — the folder PC
+emitted "IPF.Note" but the hier row CEB-cleared the column. scanpst
+strict mode flags any (row CEB=True, PC absent) or (row CEB=False,
+PC has non-default value) as "row doesn't match sub-object".
+
+**Fixes applied**:
+
+1. **Contents TC row** ([src/messaging.cpp `buildFolderContentsTc`](src/messaging.cpp)):
+   - `0x0E17` (PR_MESSAGE_STATUS): CEB only when value != 0
+   - `0x0036` (PR_SENSITIVITY): CEB only when value != 0
+   - `0x0057` (PR_MESSAGE_TO_ME): CEB only when value == true
+   - `0x0058` (PR_MESSAGE_CC_ME): CEB only when value == true
+   - Other unconditional bits (LtpRowId/Ver, MessageFlags, Importance,
+     MessageSize) preserved — `buildMailPc` always emits these
+
+2. **Hierarchy TC row** ([src/messaging.cpp `buildFolderHierarchyTc`](src/messaging.cpp)):
+   - Replaced static `kHierarchyCebByte0=0xFD / Byte1=0x00` with
+     dynamic per-row CEB construction
+   - Dropped `iBit 7` (PR_CHANGENUM) — folder PC doesn't emit 0x0E33
+   - Added `iBit 10` (PR_CONTAINER_CLASS) populated from
+     `HierarchyTcRow::containerClassUtf16le` when set
+
+3. **HierarchyTcRow struct extended** ([include/pstwriter/messaging.hpp](include/pstwriter/messaging.hpp)):
+   - New `containerClassUtf16le / containerClassSize` fields. When set,
+     the row emits `0x3613` as a varlen HID matching the child
+     folder's PC value.
+
+4. **mail.cpp plumbing** ([src/mail.cpp](src/mail.cpp) IPM Subtree
+   hierarchy build): folderNameStore already stored the
+   container-class buffer at index `2*i+1`; pass it through to the
+   new `HierarchyTcRow.containerClassUtf16le` field.
+
+**Verification (mandatory pre-handoff per discipline rule)**:
+
+```
+$ python .tmp/diff_tc_pc.py .tmp/m11n_simple.pst
+Bisection #1: 0x800E row 0 vs 0x8004 — every column [MATCH] or symmetric-absent
+Bisection #2: 0x802D row 0 vs 0x8002 —
+  tag=0x0E33 iBit=7  CEB=False (was True)         ✓ symmetric-absent
+  tag=0x3613 iBit=10 CEB=True row="IPF.Note" pc="IPF.Note"  ✓ MATCH
+```
+
+ZERO MISMATCH lines. Test suite 233/233. pst_info ALL CHECKS PASSED.
+
+**Diagnostic artifact preserved**: [.tmp/diff_tc_pc.py](.tmp/diff_tc_pc.py)
+remains in the tree as a regression-prevention tool. Run it after any
+TC row builder change to verify CEB-vs-PC parity stays aligned.
+
 ### M11-F — Show-stoppers from external code review (TC overflow / XBLOCK chaining / buffer aliasing / RowVer)
 
 **Status: FIXED (4 of 21 review items). 17 remaining items deferred to M10+.**
