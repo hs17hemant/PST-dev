@@ -11,6 +11,7 @@
 #include "m5_allocator.hpp"
 #include "mail.hpp"
 #include "messaging.hpp"
+#include "pst_baseline.hpp"
 #include "types.hpp"
 #include "writer.hpp"
 
@@ -344,12 +345,6 @@ WriteResult writeM8Pst(const M8PstConfig& config) noexcept
 
         M5Allocator alloc;
 
-        // Pre-bind common UTF-16-LE buffers.
-        const auto nameTopOfPersonal  = u16le("Top of Personal Folders");
-        const auto nameSearchRoot     = u16le("Search Root");
-        const auto nameSpamSearch     = u16le("Spam Search Folder");
-        const auto nameDeletedItems   = u16le("Deleted Items");
-
         // Storage for per-folder UTF-16-LE buffers (must outlive schema).
         vector<vector<uint8_t>> folderBufStore;
         folderBufStore.reserve(config.folders.size() * 2);
@@ -377,126 +372,16 @@ WriteResult writeM8Pst(const M8PstConfig& config) noexcept
             nodes.push_back(std::move(n));
         };
 
-        // ============================================================
-        // 1. The 27 §2.7.1 mandatory nodes.
-        // ============================================================
-        // Message Store
+        // 1. The 24 §2.7.1 mandatory nodes (excluding 0x802D/0x802E/0x802F
+        // which are folder-list dependent — added by caller below).
+        for (auto& e : buildPstBaselineEntries(config.providerUid,
+                                                config.pstDisplayName))
         {
-            MessageStoreSchema mss{};
-            mss.providerUid = config.providerUid;
-            const auto pstDisplay = u16le(config.pstDisplayName);
-            mss.displayNameUtf16le = pstDisplay.data();
-            mss.displayNameSize    = pstDisplay.size();
-            auto pc = buildMessageStorePc(mss, kDummySub);
-            scheduleNode(Nid{0x00000021u}, Nid{0u}, std::move(pc.hnBytes));
+            scheduleNode(e.nid, e.nidParent, std::move(e.body));
         }
 
-        // NameToIdMap
-        {
-            auto pc = buildNameToIdMapPc(kDummySub);
-            scheduleNode(Nid{0x00000061u}, Nid{0u}, std::move(pc.hnBytes));
-        }
-
-        // Root Folder
-        {
-            FolderPcSchema rs{};
-            rs.hasSubfolders = true;
-            auto pc = buildFolderPc(rs, kDummySub);
-            scheduleNode(Nid{0x00000122u}, Nid{0x00000122u}, std::move(pc.hnBytes));
-        }
-
-        // Root Hierarchy TC
-        {
-            HierarchyTcRow rootHier[3];
-            rootHier[0].rowId              = Nid{0x00002223u};
-            rootHier[0].displayNameUtf16le = nameSpamSearch.data();
-            rootHier[0].displayNameSize    = nameSpamSearch.size();
-            rootHier[0].hasSubfolders      = false;
-            rootHier[1].rowId              = Nid{0x00008022u};
-            rootHier[1].displayNameUtf16le = nameTopOfPersonal.data();
-            rootHier[1].displayNameSize    = nameTopOfPersonal.size();
-            rootHier[1].hasSubfolders      = true;
-            rootHier[2].rowId              = Nid{0x00008042u};
-            rootHier[2].displayNameUtf16le = nameSearchRoot.data();
-            rootHier[2].displayNameSize    = nameSearchRoot.size();
-            rootHier[2].hasSubfolders      = false;
-            auto tc = buildFolderHierarchyTc(rootHier, 3);
-            scheduleNode(Nid{0x0000012Du}, Nid{0u}, std::move(tc.hnBytes));
-        }
-
-        scheduleNode(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc().hnBytes);
-        scheduleNode(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes);
-        scheduleNode(Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload());
-        scheduleNode(Nid{0x00000201u}, Nid{0u}, buildEmptyNodePayload());
-        scheduleNode(Nid{0x0000060Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0).hnBytes);
-        scheduleNode(Nid{0x0000060Eu}, Nid{0u}, buildFolderContentsTc().hnBytes);
-        scheduleNode(Nid{0x0000060Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes);
-        scheduleNode(Nid{0x00000610u}, Nid{0u}, buildSearchContentsTemplateTc().hnBytes);
-        scheduleNode(Nid{0x00000671u}, Nid{0u}, buildAttachmentTemplateTc().hnBytes);
-        scheduleNode(Nid{0x00000692u}, Nid{0u}, buildRecipientTemplateTc().hnBytes);
-
-        // Spam Search
-        {
-            FolderPcSchema ss{};
-            ss.displayNameUtf16le = nameSpamSearch.data();
-            ss.displayNameSize    = nameSpamSearch.size();
-            auto pc = buildSearchFolderPc(ss, kDummySub);
-            scheduleNode(Nid{0x00002223u}, Nid{0x00000122u}, std::move(pc.hnBytes));
-        }
-
-        // IPM Subtree
-        {
-            FolderPcSchema ipm{};
-            ipm.displayNameUtf16le = nameTopOfPersonal.data();
-            ipm.displayNameSize    = nameTopOfPersonal.size();
-            ipm.hasSubfolders      = true;
-            auto pc = buildFolderPc(ipm, kDummySub);
-            scheduleNode(Nid{0x00008022u}, Nid{0x00000122u}, std::move(pc.hnBytes));
-        }
-
-        // Search Root / Finder
-        {
-            FolderPcSchema fr{};
-            fr.displayNameUtf16le = nameSearchRoot.data();
-            fr.displayNameSize    = nameSearchRoot.size();
-            auto pc = buildFolderPc(fr, kDummySub);
-            scheduleNode(Nid{0x00008042u}, Nid{0x00000122u}, std::move(pc.hnBytes));
-        }
-        scheduleNode(Nid{0x0000804Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0).hnBytes);
-        scheduleNode(Nid{0x0000804Eu}, Nid{0u}, buildFolderContentsTc().hnBytes);
-        scheduleNode(Nid{0x0000804Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes);
-
-        // Deleted Items
-        {
-            FolderPcSchema di{};
-            di.displayNameUtf16le = nameDeletedItems.data();
-            di.displayNameSize    = nameDeletedItems.size();
-            auto pc = buildFolderPc(di, kDummySub);
-            scheduleNode(Nid{0x00008062u}, Nid{0x00008022u}, std::move(pc.hnBytes));
-        }
-        scheduleNode(Nid{0x0000806Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0).hnBytes);
-        scheduleNode(Nid{0x0000806Eu}, Nid{0u}, buildFolderContentsTc().hnBytes);
-        scheduleNode(Nid{0x0000806Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes);
-
-        // ============================================================
         // 2. Pre-register reserved §2.7.1 NIDs into allocator.
-        // ============================================================
-        for (uint32_t reserved : {
-                 0x0000012Du, 0x0000012Eu, 0x0000012Fu,
-                 0x0000060Du, 0x0000060Eu, 0x0000060Fu, 0x00000610u,
-                 0x00000671u, 0x00000692u,
-                 0x00002223u,
-                 0x00008022u, 0x0000802Du, 0x0000802Eu, 0x0000802Fu,
-                 0x00008042u, 0x0000804Du, 0x0000804Eu, 0x0000804Fu,
-                 0x00008062u, 0x0000806Du, 0x0000806Eu, 0x0000806Fu,
-             })
-        {
-            if (M5Allocator::isValidNidType(Nid{reserved}.type())) {
-                if (!alloc.isAllocated(Nid{reserved})) {
-                    alloc.registerExternal(Nid{reserved});
-                }
-            }
-        }
+        registerBaselineReservedNids(alloc);
 
         // ============================================================
         // 3. Allocate user-folder NIDs + sibling-table NIDs.
