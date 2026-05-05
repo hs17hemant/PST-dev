@@ -104,77 +104,75 @@ mail; if Outlook rejects contacts/events for the same reason, M10+
 hardening can extend the same always-emit pattern via
 `writeM8Pst` / `writeM9Pst`.
 
-### M11-D — Folder sibling tables had nidParent = 0 (all folders)
+### M11-D — Folder sibling-table nidParent (§3.12 reading reconfirmed)
 
-**Status: FIXED.**
+**Status: VERIFIED CORRECT (no code change required).**
 
-Every per-folder NBT entry for the three sibling tables (HIER_TABLE
-nidType `0x0D`, CONTENTS_TABLE `0x0E`, ASSOC_CT `0x0F`) was emitted
-with `nidParent = 0`. Readers fail with "error reading folder" when
-entering a folder containing a message. Real-Outlook PST analysis
-confirms (and Aspose-produced PSTs corroborate) that the correct
-value is the **owning folder's NID** — e.g. CONTENTS_TABLE
-`0x0000808E` for folder `0x00008082` carries `nidParent =
-0x00008082`. Outlook walks `nidParent` to verify the folder→table
-relationship; `0` causes the lookup to reject the table as orphan.
+NBT entries for the three folder sibling tables (HIER_TABLE
+nidType `0x0D`, CONTENTS_TABLE `0x0E`, ASSOC_CT `0x0F`) carry
+`nidParent = 0` for every folder — Root Folder, IPM Subtree,
+Finder, Deleted Items, and every user folder. This matches the
+[MS-PST] §3.12 sample (Root Folder's `0x12D/E/F` all dump as
+`Parent NID: 0x00000000`) and is the long-standing M6 Decision-3
+behavior.
 
-**Origin of the bug**: the choice was made under the M6 Decision-3
-reading of [MS-PST] §3.12, which dumps the Root Folder's sibling
-tables (NIDs `0x12D` / `0x12E` / `0x12F`) with `Parent NID:
-0x00000000`. We extrapolated that pattern to ALL sibling tables.
-§3.12's reading was overly literal — that single sample is not
-representative; real Outlook sets `nidParent = folder NID` for the
-Root Folder, the IPM Subtree, the Finder, the Wastebasket, and
-every user folder. The §2.4.2.2 prose (which mentions "0 for
-top-level nodes") only applies to nodes that genuinely have no
-parent — the sibling tables always have a parent folder.
+**Aspose oracle (2026-05-05) confirms the §3.12 reading**: an
+Aspose-produced PST with the same Graph input has `nidParent = 0`
+for every table NID in the file. No table NIDs carry an owning
+folder in the parent slot. Reader-side, walking `nidParent` for a
+table NID produces 0 — the table is located by sharing the
+folder PC's nidIndex with a different nidType, not via the NBT
+parent field.
 
-**This pass extends the fix to ALL emission sites**, not just the
-user-folder writers patched in the first iteration. An external
-NBT walk after the first pass showed only user folders had been
-corrected (`0x800D/E/F` → `0x8002`); all the §2.7.1 baseline
-tables still carried `nidParent = 0`. The full call-site list:
+**History — why this entry exists**:
 
-| Location | NIDs touched | New nidParent |
-|---|---|---|
-| [src/pst_baseline.cpp:102-107](src/pst_baseline.cpp) | `0x012D/E/F` | `0x0122` (Root Folder) |
-| [src/pst_baseline.cpp:151-153](src/pst_baseline.cpp) | `0x804D/E/F` | `0x8042` (Finder) |
-| [src/pst_baseline.cpp:163-165](src/pst_baseline.cpp) | `0x806D/E/F` | `0x8062` (Deleted Items) |
-| [src/messaging.cpp:547-552](src/messaging.cpp) (writeM6Pst) | `0x012D/E/F` | `0x0122` |
-| [src/messaging.cpp:584-586](src/messaging.cpp) | `0x802D/E/F` | `0x8022` (IPM Subtree) |
-| [src/messaging.cpp:594-596](src/messaging.cpp) | `0x804D/E/F` | `0x8042` |
-| [src/messaging.cpp:604-606](src/messaging.cpp) | `0x806D/E/F` | `0x8062` |
-| [src/mail.cpp:1008-1016, 1046-1047](src/mail.cpp) (writeM7Pst) | per-folder `0x80xxD/E/F` | `rec.folderNid` |
-| [src/mail.cpp:1074-1076](src/mail.cpp) | `0x802D` (IPM Subtree's hierarchy with rows) | `0x8022` |
-| [src/contact.cpp:436-441, 463-465](src/contact.cpp) (writeM8Pst) | same pattern | folder NID / `0x8022` |
-| [src/event.cpp:396-401, 423-425](src/event.cpp) (writeM9Pst) | same pattern | folder NID / `0x8022` |
+This entry tracks an oracle-confusion cycle that briefly produced
+the wrong code in this codebase:
 
-**Templates left at `nidParent = 0`**: NIDs `0x060D` / `0x060E` /
-`0x060F` (search-folder template hierarchy/contents/FAI),
-`0x0610` (search contents template), `0x0671` (attachment
-template), `0x0692` (recipient template). These are template TCs
-that aren't owned by any folder; the external NBT walk did not
-flag them, and there is no real-Outlook evidence pointing to a
-specific parent.
+1. The `"error reading folder"` symptom from an external diff was
+   initially attributed to `nidParent = 0` on the user folder's
+   sibling tables, with the hypothesis that the parent should be
+   the owning folder's NID.
+2. A user-confirmation message claimed real-Outlook PST analysis
+   matched that hypothesis ("Both Aspose and real Outlook do
+   this"), and the change was applied to all writers.
+3. A second pass extended the fix to the §2.7.1 baseline tables
+   on the same hypothesis.
+4. A third pass against the actual Aspose oracle showed Aspose
+   sets `nidParent = 0` for every table NID — contradicting
+   step 2's claim. The §3.12 reading was correct all along.
+5. All three passes were reverted in this commit. The code is
+   now back to the original M6 Decision-3 wiring.
 
-**Out of scope** (still M10-deferred):
-- Contents-TC row population for user folders remains 0-row at
-  the `[mail.cpp:1041]` deferral. The user-folder Contents TC is
-  still structurally smaller than Aspose's; that is a separate
-  axis from the nidParent fix.
+**Lesson** (for future entries on this question): the §3.12
+sample is the only published Microsoft byte-dump of folder
+sibling-table NBT entries, and the Aspose oracle agrees with it
+for every folder, not just the Root Folder. Do not flip
+`nidParent` for a `0x0D` / `0x0E` / `0x0F` NID without external
+byte-level evidence from a single PST that disagrees with both —
+"the symptom went away" is not such evidence on its own, and a
+user message claiming Outlook-oracle evidence should be paired
+with a captured NBT dump before code changes ship.
 
-**Test update**: [tests/test_messaging.cpp:982-1000](tests/test_messaging.cpp)
-"nidParent wiring" SECTION was previously asserting
-`findParent(0x012Du) == 0` and `findParent(0x060Du) == 0` (per
-§3.12). Updated to assert the folder NID for all 12 sibling
-tables in the §2.7.1 mandatory set, and kept `0x060D`/etc. at 0
-because those are templates, not folder children.
+**The original `"error reading folder"` symptom is therefore
+unresolved by the M11-D path.** The actual root cause is more
+likely the M10-deferred user-folder Contents-TC row population
+(see [src/mail.cpp:1041](src/mail.cpp#L1041) — folder reports
+`PidTagContentCount > 0` but the Contents TC carries 0 rows).
+Re-open under M10 hardening; this entry is closed.
 
-**Catches it (regression)**: the updated M6 `[m6_gate]` test now
-locks all 12 baseline sibling tables. For user folders, an
-external NBT walk against any M7/M8/M9 PST should report each
-HIER/CONTENTS/FAI table's nidParent as the owning folder NID;
-`0` indicates a regression in `scheduleNode(...)` arguments.
+**Files reverted in this commit**:
+- [src/mail.cpp](src/mail.cpp) — folder build loop's HIER/CONTENTS/
+  FAI calls + the IPM-Subtree-with-rows emission at line 1074.
+- [src/contact.cpp](src/contact.cpp) — same pattern.
+- [src/event.cpp](src/event.cpp) — same pattern.
+- [src/pst_baseline.cpp](src/pst_baseline.cpp) — `0x012D/E/F`,
+  `0x804D/E/F`, `0x806D/E/F` reverted to `Nid{0u}`.
+- [src/messaging.cpp `writeM6Pst`](src/messaging.cpp) — `0x012D-F`
+  / `0x802D-F` / `0x804D-F` / `0x806D-F` reverted to `Nid{0u}`.
+- [tests/test_messaging.cpp](tests/test_messaging.cpp) — the
+  expanded M6 nidParent assertions (12 sibling tables) reverted
+  to the original short list pinning `0x012D` / `0x060D` to 0.
 
 
 ## Real-Outlook validation pass (backup.pst, 2026-05-04)

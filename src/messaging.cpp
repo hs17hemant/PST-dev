@@ -340,6 +340,168 @@ TcResult buildFolderContentsTc()
     return buildTableContext(kContentsCols, 27, nullptr, 0);
 }
 
+namespace {
+
+// Per-row matrix size derived from the 27-col Contents schema:
+// 118 bytes of fixed data + 4-byte CEB = 122.
+constexpr size_t kContentsRowSize = 122;
+constexpr size_t kContentsCebOff  = 118;
+constexpr size_t kContentsCebSize = 4;
+
+// colIndex of each column in the tag-sorted kContentsCols[] schema.
+// (Matches the order kContentsCols is declared.) Used to address
+// varlen cells via TcVarlenCell.colIndex.
+constexpr size_t kColImportance              = 0;
+constexpr size_t kColMessageClass            = 1;
+constexpr size_t kColSensitivity             = 2;
+constexpr size_t kColSubject                 = 3;
+constexpr size_t kColClientSubmitTime        = 4;
+constexpr size_t kColSentRepresentingName    = 5;
+constexpr size_t kColMessageToMe             = 6;
+constexpr size_t kColMessageCcMe             = 7;
+constexpr size_t kColConversationTopic       = 8;
+constexpr size_t kColConversationIndex       = 9;
+constexpr size_t kColDisplayCc               = 10;
+constexpr size_t kColDisplayTo               = 11;
+constexpr size_t kColMessageDeliveryTime     = 12;
+constexpr size_t kColMessageFlags            = 13;
+constexpr size_t kColMessageSize             = 14;
+constexpr size_t kColMessageStatus           = 15;
+constexpr size_t kColLastModificationTime    = 23;
+constexpr size_t kColLtpRowId                = 25;
+constexpr size_t kColLtpRowVer               = 26;
+
+// Set the CEB bit for `iBit` (high-bit-first byte numbering — bit 0
+// of byte 0 is bit 7 of CEB[0], same convention as the Hierarchy TC).
+inline void setCebBit(uint8_t* ceb, unsigned iBit) noexcept
+{
+    const unsigned byteIdx = iBit / 8u;
+    const unsigned bitInByte = 7u - (iBit % 8u);
+    ceb[byteIdx] |= static_cast<uint8_t>(1u << bitInByte);
+}
+
+} // namespace
+
+TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount)
+{
+    if (rowCount == 0u) {
+        return buildTableContext(kContentsCols, 27, nullptr, 0);
+    }
+
+    // Stable per-row buffers + varlen-cell descriptors. Pointers into
+    // these vectors must stay valid until buildTableContext returns;
+    // we reserve up front so push_back never reallocates.
+    vector<array<uint8_t, kContentsRowSize>> rowBuffers(rowCount);
+    vector<vector<TcVarlenCell>>             perRowVarlen(rowCount);
+    vector<TcRow>                            tcRows(rowCount);
+
+    for (size_t r = 0; r < rowCount; ++r) {
+        const ContentsTcRow& src = rows[r];
+        uint8_t* dst = rowBuffers[r].data();
+        std::memset(dst, 0, kContentsRowSize);
+
+        uint8_t* ceb = dst + kContentsCebOff;
+
+        // ---- Fixed Int32 / SystemTime / Boolean cells ----
+        // ibData / iBit values lifted verbatim from kContentsCols above.
+
+        // LtpRowId @ ibData=0, iBit=0 — always present.
+        detail::writeU32(dst, 0, src.rowId.value);
+        setCebBit(ceb, 0);
+
+        // LtpRowVer @ ibData=4, iBit=1 — always present.
+        detail::writeU32(dst, 4, src.rowVer);
+        setCebBit(ceb, 1);
+
+        // MessageStatus @ ibData=8, iBit=2 — always emit (default 0).
+        detail::writeU32(dst, 8, static_cast<uint32_t>(src.messageStatus));
+        setCebBit(ceb, 2);
+
+        // MessageFlags @ ibData=16, iBit=4 — always.
+        detail::writeU32(dst, 16, static_cast<uint32_t>(src.messageFlags));
+        setCebBit(ceb, 4);
+
+        // Importance @ ibData=20, iBit=5 — always.
+        detail::writeU32(dst, 20, static_cast<uint32_t>(src.importance));
+        setCebBit(ceb, 5);
+
+        // MessageDeliveryTime @ ibData=32, iBit=8 — when non-zero.
+        if (src.messageDeliveryTime != 0u) {
+            detail::writeU64(dst, 32, src.messageDeliveryTime);
+            setCebBit(ceb, 8);
+        }
+
+        // ClientSubmitTime @ ibData=40, iBit=9 — when non-zero.
+        if (src.clientSubmitTime != 0u) {
+            detail::writeU64(dst, 40, src.clientSubmitTime);
+            setCebBit(ceb, 9);
+        }
+
+        // MessageSize @ ibData=48, iBit=10 — always.
+        detail::writeU32(dst, 48, static_cast<uint32_t>(src.messageSize));
+        setCebBit(ceb, 10);
+
+        // Sensitivity @ ibData=60, iBit=15 — always.
+        detail::writeU32(dst, 60, static_cast<uint32_t>(src.sensitivity));
+        setCebBit(ceb, 15);
+
+        // LastModificationTime @ ibData=80, iBit=20 — when non-zero.
+        if (src.lastModificationTime != 0u) {
+            detail::writeU64(dst, 80, src.lastModificationTime);
+            setCebBit(ceb, 20);
+        }
+
+        // MessageToMe @ ibData=116, iBit=13 / MessageCcMe @ 117, iBit=14
+        // — always emit the boolean (0 = false).
+        dst[116] = src.messageToMe ? 1u : 0u;
+        setCebBit(ceb, 13);
+        dst[117] = src.messageCcMe ? 1u : 0u;
+        setCebBit(ceb, 14);
+
+        // ---- Varlen cells ----
+        // The HID slot at each varlen column's ibData is left as zero;
+        // buildTableContext patches it with the assigned HID after
+        // allocating the underlying HN range.
+        auto pushVarlen = [&](size_t colIdx, unsigned iBit,
+                              const uint8_t* bytes, size_t size) {
+            if (bytes == nullptr || size == 0u) return;
+            perRowVarlen[r].push_back({ colIdx, bytes, size });
+            setCebBit(ceb, iBit);
+        };
+
+        // MessageClass_W (colIdx=1, ibData=12, iBit=3)
+        pushVarlen(kColMessageClass, 3,
+                   src.messageClassUtf16le, src.messageClassSize);
+        // SentRepresentingName_W (colIdx=5, ibData=24, iBit=6)
+        pushVarlen(kColSentRepresentingName, 6,
+                   src.sentRepresentingNameUtf16le,
+                   src.sentRepresentingNameSize);
+        // Subject_W (colIdx=3, ibData=28, iBit=7)
+        pushVarlen(kColSubject, 7, src.subjectUtf16le, src.subjectSize);
+        // DisplayTo_W (colIdx=11, ibData=52, iBit=11)
+        pushVarlen(kColDisplayTo, 11, src.displayToUtf16le, src.displayToSize);
+        // DisplayCc_W (colIdx=10, ibData=56, iBit=12)
+        pushVarlen(kColDisplayCc, 12, src.displayCcUtf16le, src.displayCcSize);
+        // ConversationTopic_W (colIdx=8, ibData=68, iBit=17)
+        pushVarlen(kColConversationTopic, 17,
+                   src.conversationTopicUtf16le,
+                   src.conversationTopicSize);
+        // ConversationIndex (colIdx=9, ibData=72, iBit=18 — Binary)
+        pushVarlen(kColConversationIndex, 18,
+                   src.conversationIndexBytes,
+                   src.conversationIndexSize);
+
+        tcRows[r].rowId       = src.rowId.value;
+        tcRows[r].rowBytes    = rowBuffers[r].data();
+        tcRows[r].rowSize     = kContentsRowSize;
+        tcRows[r].varlenCells = perRowVarlen[r].empty()
+                                  ? nullptr : perRowVarlen[r].data();
+        tcRows[r].varlenCount = perRowVarlen[r].size();
+    }
+
+    return buildTableContext(kContentsCols, 27, tcRows.data(), rowCount);
+}
+
 TcResult buildFolderFaiContentsTc()
 {
     return buildTableContext(kFaiContentsCols, 17, nullptr, 0);
@@ -544,13 +706,12 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         rootHier[2].displayNameUtf16le = nameSearchRoot.data();
         rootHier[2].displayNameSize    = nameSearchRoot.size();
         rootHier[2].hasSubfolders      = false;
-        pushTc(Nid{0x0000012Du}, Nid{0x00000122u},
-               buildFolderHierarchyTc(rootHier, 3));
+        pushTc(Nid{0x0000012Du}, Nid{0u}, buildFolderHierarchyTc(rootHier, 3));
 
-        // ---- 5. Root Folder Contents TC (0x12E; nidParent = Root) ----
-        pushTc(Nid{0x0000012Eu}, Nid{0x00000122u}, buildFolderContentsTc());
-        // ---- 6. Root Folder FAI Contents TC (0x12F; nidParent = Root) ----
-        pushTc(Nid{0x0000012Fu}, Nid{0x00000122u}, buildFolderFaiContentsTc());
+        // ---- 5. Root Folder Contents TC (0x12E) ----
+        pushTc(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc());
+        // ---- 6. Root Folder FAI Contents TC (0x12F) ----
+        pushTc(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc());
 
         // ---- 7. SearchManagementQueue (bare, 0x1E1) ----
         nodes.push_back({ Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload() });
@@ -582,10 +743,9 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         ipmSchema.hasSubfolders      = true;   // contains Deleted Items
         pushPc(Nid{0x00008022u}, Nid{0x00000122u},
                buildFolderPc(ipmSchema, kDummySub));
-        // IPM Subtree's three sibling tables: nidParent = IPM Subtree NID
-        pushTc(Nid{0x0000802Du}, Nid{0x00008022u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000802Eu}, Nid{0x00008022u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000802Fu}, Nid{0x00008022u}, buildFolderFaiContentsTc());
+        pushTc(Nid{0x0000802Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000802Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000802Fu}, Nid{0u}, buildFolderFaiContentsTc());
 
         // ---- 20-23. Search Root / Finder (0x8042; parent = Root) + tables ----
         FolderPcSchema finderSchema{};
@@ -593,10 +753,9 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         finderSchema.displayNameSize    = nameSearchRoot.size();
         pushPc(Nid{0x00008042u}, Nid{0x00000122u},
                buildFolderPc(finderSchema, kDummySub));
-        // Finder's three sibling tables: nidParent = Finder NID
-        pushTc(Nid{0x0000804Du}, Nid{0x00008042u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000804Eu}, Nid{0x00008042u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000804Fu}, Nid{0x00008042u}, buildFolderFaiContentsTc());
+        pushTc(Nid{0x0000804Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000804Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000804Fu}, Nid{0u}, buildFolderFaiContentsTc());
 
         // ---- 24-27. Deleted Items (0x8062; parent = IPM Subtree) + tables ----
         FolderPcSchema deletedSchema{};
@@ -604,10 +763,9 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         deletedSchema.displayNameSize    = nameDeletedItems.size();
         pushPc(Nid{0x00008062u}, Nid{0x00008022u},
                buildFolderPc(deletedSchema, kDummySub));
-        // Deleted Items' three sibling tables: nidParent = Deleted Items NID
-        pushTc(Nid{0x0000806Du}, Nid{0x00008062u}, buildFolderHierarchyTc(nullptr, 0));
-        pushTc(Nid{0x0000806Eu}, Nid{0x00008062u}, buildFolderContentsTc());
-        pushTc(Nid{0x0000806Fu}, Nid{0x00008062u}, buildFolderFaiContentsTc());
+        pushTc(Nid{0x0000806Du}, Nid{0u}, buildFolderHierarchyTc(nullptr, 0));
+        pushTc(Nid{0x0000806Eu}, Nid{0u}, buildFolderContentsTc());
+        pushTc(Nid{0x0000806Fu}, Nid{0u}, buildFolderFaiContentsTc());
 
         if (nodes.size() != 27u) {
             return { false, "writeM6Pst: internal — expected 27 nodes" };
