@@ -5,6 +5,106 @@ would resolve**. When `tests/golden/empty.pst` (or any equivalent
 ground-truth file) is finally produced by Outlook, this is the diff list
 to check first.
 
+## M11 Outlook-open triage (Aspose vs pstwriter byte-diff, 2026-05-05)
+
+Three independent defects identified by byte-diffing an Aspose-produced
+PST against a pstwriter-produced PST built from the same Graph input.
+All three resolved in this pass. Each section below records the
+empirical signal, the fix, and what would invalidate the fix.
+
+### M11-A — User-allocated NIDs landed in [MS-PST] §2.4.3 reserved range
+
+**Status: FIXED.**
+
+Aspose placed the test message at `NID 0x00200024` (nidIndex `0x10001`,
+nidType `NormalMessage`) inside a folder at `NID 0x00008082` (nidIndex
+`0x404`). pstwriter emitted `NID 0x00000024` and `NID 0x00000022` —
+both with nidIndex `0x1`, well inside the `[MS-PST] §2.4.3` reserved
+range. Outlook rejects PSTs that put user-allocatable nodes inside
+that range as malformed.
+
+Fix: [src/m5_allocator.cpp:33](src/m5_allocator.cpp#L33) introduces
+`kUserAllocStart = 0x400`. Every nidType slot except `Internal` (0x01)
+and `HID` (0x00) seeds its per-type counter at `0x400` instead of `1`.
+`Internal` keeps starting at `1` because [SPEC sec 2.4.1] pins multiple
+reserved Internal NIDs at low indices (the constructor still
+pre-populates the 14-NID reserved set so the auto-counter skips those).
+
+Tests updated: [test_m5_allocator.cpp](tests/test_m5_allocator.cpp)
+hard-coded sequences updated for the new starting indices;
+[test_m5_nbt_reader.cpp](tests/test_m5_nbt_reader.cpp) comments
+refreshed.
+
+**Catches it (regression)**: Aspose-vs-pstwriter byte diff on the
+re-emitted PST should show user folder NIDs in the `0x8002+` range and
+message NIDs in the `0x8004+` range, both with nidIndex >= `0x400`.
+
+### M11-B — buildMailPc dropped ~30% of expected property content
+
+**Status: FIXED.**
+
+Aspose's message PC carried ~862 more bytes of property data, ~430
+extra UTF-16-LE characters, than pstwriter's. The deficit traced to
+properties Outlook reads to populate its message-list view, conversation
+grouping, and reading-pane preview but which `buildMailPc` never
+emitted.
+
+Added at [src/mail.cpp `buildMailPc`](src/mail.cpp):
+
+| Tag      | Property                  | Why it matters                                                |
+|----------|---------------------------|---------------------------------------------------------------|
+| `0x0E04` | PidTagDisplayTo           | "To" column in message list — Outlook does NOT re-derive from recipient TC |
+| `0x0E03` | PidTagDisplayCc           | "Cc" column                                                    |
+| `0x0E02` | PidTagDisplayBcc          | "Bcc" column                                                   |
+| `0x0070` | PidTagConversationTopic   | Conversation grouping key                                      |
+| `0x0E1D` | PidTagNormalizedSubject   | Subject minus prefix; thread/search                            |
+| `0x003D` | PidTagSubjectPrefix       | "RE: " / "FW: " (only when present)                            |
+| `0x0E08` | PidTagMessageSize         | Outlook-reported size; advisory                                |
+| `0x0FFE` | PidTagObjectType          | `5` (MAPI_MESSAGE) — protocol discriminator                    |
+| `0x3FDE` | PidTagInternetCodepage    | `65001` (UTF-8) when an HTML body is present                   |
+| `0x6722` | PidTagLocalCommitTime     | Mirrors LastModificationTime; Outlook last-touched stamp       |
+
+Helpers added: `joinRecipientDisplay` (semicolon-separated display
+names per [MS-OXOMSG] §2.2.1.7), `splitSubject` (3-letter prefix +
+`": "` rule per [MS-OXCMSG] §3.2.4.4), `estimateMessageSize` (sum of
+text + header + attachment payloads, capped at `UINT32_MAX`).
+
+**Catches it (regression)**: Aspose-vs-pstwriter UTF-16 character
+count on the message PC should now be within 5%; the missing-tag
+delta from the diff drops to zero for the 10 tags above.
+
+**Out of scope**: PidTagSearchKey / PidTagRecordKey (16-byte MAPI
+keys) and PidTagInternetReferences not yet emitted — they tend to
+self-populate when Outlook indexes the file and were not flagged as
+load-bearing in the triage.
+
+### M11-C — Recipient table subnode missing for zero-recipient messages
+
+**Status: FIXED.**
+
+The Aspose subnode tree was 80 bytes; pstwriter's was 56. The
+24-byte delta exactly matched one missing SLENTRY for the recipient
+table. Per [MS-OXCMSG] §2.2.1.47.1 every message MUST own a recipient
+table at NID `0x692`, even outgoing autoreplies with no recipients.
+
+Fix: [src/mail.cpp `writeM7Pst` step 5b](src/mail.cpp) now always
+calls `buildRecipientTc(allRecipients)` and emplaces the resulting
+SLENTRY, regardless of whether `allRecipients` is empty.
+`buildRecipientTc` already supports `rowCount == 0` (delegates to
+`buildTableContext(..., nullptr, 0)`, the same path used by
+`buildRecipientTemplateTc`).
+
+**Catches it (regression)**: Aspose-vs-pstwriter SLBLOCK-size diff
+on a zero-recipient message should now be zero; the SLENTRY for
+NID `0x692` should be present.
+
+**Out of scope**: contacts (`IPM.Contact`) and events (`IPM.Appointment`)
+do not currently emit a recipient TC. The bug report only flagged
+mail; if Outlook rejects contacts/events for the same reason, M10+
+hardening can extend the same always-emit pattern via
+`writeM8Pst` / `writeM9Pst`.
+
+
 ## Real-Outlook validation pass (backup.pst, 2026-05-04)
 
 Resolved against a real Outlook-produced PST (2.3 MB Unicode, wVer=23,

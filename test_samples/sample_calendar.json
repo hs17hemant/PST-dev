@@ -1,0 +1,63 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('test')/events",
+  "value": [
+    {
+      "id": "AAMkAGI2T-EVENT-1=",
+      "iCalUId": "040000008200E00074C5B7101A82E00800000000B0F2C9E5",
+      "subject": "Vault platform — Q2 review",
+      "bodyPreview": "Quarterly review of backup throughput, restore SLA, and roadmap.",
+      "body": {
+        "contentType": "html",
+        "content": "<p>Agenda:</p><ol><li>Backup throughput</li><li>Restore SLA</li><li>Roadmap Q3</li></ol>"
+      },
+      "createdDateTime": "2026-04-01T09:00:00Z",
+      "lastModifiedDateTime": "2026-04-25T12:00:00Z",
+      "start":     { "dateTime": "2026-05-12T15:00:00.0000000", "timeZone": "UTC" },
+      "end":       { "dateTime": "2026-05-12T16:00:00.0000000", "timeZone": "UTC" },
+      "location":  { "displayName": "Microsoft Teams meeting", "locationType": "default" },
+      "isAllDay": false,
+      "isCancelled": false,
+      "isOrganizer": true,
+      "isOnlineMeeting": true,
+      "responseRequested": true,
+      "importance": "high",
+      "showAs": "busy",
+      "type": "singleInstance",
+      "organizer": {
+        "emailAddress": { "name": "Rohit Sharma", "address": "rohit.sharma@qfion.com" }
+      },
+      "attendees": [
+        {
+          "type": "required",
+          "status": { "response": "accepted", "time": "2026-04-25T13:00:00Z" },
+          "emailAddress": { "name": "Alice Walker", "address": "alice.walker@taylormorrison.com" }
+        },
+        {
+          "type": "optional",
+          "status": { "response": "none", "time": "0001-01-01T00:00:00Z" },
+          "emailAddress": { "name": "Bob Chen", "address": "bob.chen@qfion.com" }
+        }
+      ],
+      "categories": ["Review"]
+    },
+    {
+      "id": "AAMkAGI2T-EVENT-2=",
+      "iCalUId": "040000008200E00074C5B7101A82E00800000000B0F2C9E6",
+      "subject": "All-hands offsite",
+      "bodyPreview": "Annual all-hands offsite (all day).",
+      "body": { "contentType": "text", "content": "All-hands offsite — see hotel details in confirmation email." },
+      "createdDateTime": "2026-02-01T09:00:00Z",
+      "lastModifiedDateTime": "2026-02-01T09:00:00Z",
+      "start": { "dateTime": "2026-06-15T00:00:00.0000000", "timeZone": "UTC" },
+      "end":   { "dateTime": "2026-06-16T00:00:00.0000000", "timeZone": "UTC" },
+      "location": { "displayName": "Sedona, AZ", "locationType": "default" },
+      "isAllDay": true,
+      "isOrganizer": false,
+      "showAs": "oof",
+      "type": "singleInstance",
+      "organizer": {
+        "emailAddress": { "name": "People Ops", "address": "peopleops@qfion.com" }
+      }
+    }
+  ]
+}

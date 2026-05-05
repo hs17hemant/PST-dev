@@ -4,8 +4,10 @@
 //
 // Validates the NID assignment service:
 //   * Reserved NID enumeration matches [SPEC sec 2.4.1] verbatim.
-//   * Per-nidType counter starts at nidIndex = 1, advances by 1, skips
-//     reserved + pre-registered NIDs.
+//   * Per-nidType counter seeding: Internal at idx=1, every other
+//     user-allocatable type at idx=0x400 (per [MS-PST] §2.4.3 low-
+//     index reserved range, matching real Outlook / Aspose).
+//   * Counter advances by 1, skips reserved + pre-registered NIDs.
 //   * Cross-nidType independence (NormalFolder counter unaffected by
 //     NormalMessage allocations).
 //   * registerExternal pre-reserves NIDs; subsequent allocate(...) skips.
@@ -138,18 +140,17 @@ TEST_CASE("M5Allocator::allocate throws on invalid nidType",
 // ============================================================================
 // Per-nidType allocation: counter starts at idx=1, advances by 1, skips reserved
 // ============================================================================
-TEST_CASE("M5Allocator NormalFolder allocation skips NID_ROOT_FOLDER (0x122)",
+TEST_CASE("M5Allocator NormalFolder allocation seeds at 0x400 (above [MS-PST] §2.4.3 reserved range)",
           "[m5][allocator]")
 {
     M5Allocator a;
 
-    // NormalFolder reserved NID has nidIndex = 9 (NID_ROOT_FOLDER = 0x122).
-    // Sequence should be: 1, 2, 3, 4, 5, 6, 7, 8, [skip 9], 10, 11, ...
-    Nid n;
-    for (uint32_t expectedIdx = 1; expectedIdx <= 11; ++expectedIdx) {
-        if (expectedIdx == 9) continue;          // skipped (RootFolder)
-        n = a.allocate(NidType::NormalFolder);
-        INFO("expectedIdx=" << expectedIdx);
+    // NormalFolder is a user-allocatable nidType: its counter starts at
+    // 0x400, well past NID_ROOT_FOLDER (idx=9). Sequence is purely
+    // 0x400, 0x401, 0x402, ...
+    for (uint32_t expectedIdx = 0x400u; expectedIdx <= 0x40Au; ++expectedIdx) {
+        const Nid n = a.allocate(NidType::NormalFolder);
+        INFO("expectedIdx=0x" << std::hex << expectedIdx);
         REQUIRE(n.type() == NidType::NormalFolder);
         REQUIRE(n.index() == expectedIdx);
     }
@@ -181,27 +182,28 @@ TEST_CASE("M5Allocator Internal allocation skips all 13 reserved internal NIDs",
     }
 }
 
-TEST_CASE("M5Allocator non-reserved-nidType allocation starts cleanly at idx=1",
+TEST_CASE("M5Allocator user-allocatable nidTypes start cleanly at idx=0x400",
           "[m5][allocator]")
 {
     M5Allocator a;
 
-    // NormalMessage (0x04) has zero reserved entries — pure 1, 2, 3, ... .
-    for (uint32_t expectedIdx = 1; expectedIdx <= 5; ++expectedIdx) {
+    // NormalMessage (0x04) has zero reserved entries — pure
+    // 0x400, 0x401, 0x402, ...
+    for (uint32_t expectedIdx = 0x400u; expectedIdx <= 0x404u; ++expectedIdx) {
         const Nid n = a.allocate(NidType::NormalMessage);
         REQUIRE(n.type() == NidType::NormalMessage);
         REQUIRE(n.index() == expectedIdx);
     }
 
     // Same for Attachment (0x05).
-    for (uint32_t expectedIdx = 1; expectedIdx <= 3; ++expectedIdx) {
+    for (uint32_t expectedIdx = 0x400u; expectedIdx <= 0x402u; ++expectedIdx) {
         const Nid n = a.allocate(NidType::Attachment);
         REQUIRE(n.type() == NidType::Attachment);
         REQUIRE(n.index() == expectedIdx);
     }
 
     // And LTP (0x1F).
-    for (uint32_t expectedIdx = 1; expectedIdx <= 4; ++expectedIdx) {
+    for (uint32_t expectedIdx = 0x400u; expectedIdx <= 0x403u; ++expectedIdx) {
         const Nid n = a.allocate(NidType::LtpReserved);
         REQUIRE(n.type() == NidType::LtpReserved);
         REQUIRE(n.index() == expectedIdx);
@@ -217,13 +219,14 @@ TEST_CASE("M5Allocator nidType counters are independent",
     M5Allocator a;
 
     // Allocating NormalFolder doesn't affect NormalMessage's counter.
-    REQUIRE(a.allocate(NidType::NormalFolder).index() == 1u);
-    REQUIRE(a.allocate(NidType::NormalFolder).index() == 2u);
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 1u);   // not 3
-    REQUIRE(a.allocate(NidType::NormalFolder).index() == 3u);
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 2u);
-    REQUIRE(a.allocate(NidType::Attachment).index() == 1u);      // its own counter
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 3u);
+    // User-allocatable types each start at 0x400.
+    REQUIRE(a.allocate(NidType::NormalFolder).index()  == 0x400u);
+    REQUIRE(a.allocate(NidType::NormalFolder).index()  == 0x401u);
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x400u); // not 0x402
+    REQUIRE(a.allocate(NidType::NormalFolder).index()  == 0x402u);
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x401u);
+    REQUIRE(a.allocate(NidType::Attachment).index()    == 0x400u); // its own counter
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x402u);
 }
 
 // ============================================================================
@@ -234,20 +237,21 @@ TEST_CASE("M5Allocator::registerExternal causes auto-counter to skip pre-registe
 {
     M5Allocator a;
 
-    // Pre-register NormalMessage NID at idx=2 (NID = (2<<5)|4 = 0x44).
-    const Nid pre(NidType::NormalMessage, 2);
+    // Pre-register a NormalMessage NID one step into the user-allocatable
+    // counter range.
+    const Nid pre(NidType::NormalMessage, 0x401u);
     a.registerExternal(pre);
     REQUIRE(a.isAllocated(pre));
 
-    // First allocation: counter at 1, returns idx=1.
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 1u);
+    // First allocation: counter at 0x400, returns idx=0x400.
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x400u);
 
-    // Second allocation: counter would propose idx=2, but it's pre-registered;
-    // skip to idx=3.
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 3u);
+    // Second allocation: counter would propose 0x401, but it's pre-registered;
+    // skip to 0x402.
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x402u);
 
-    // Third allocation: idx=4 (clean).
-    REQUIRE(a.allocate(NidType::NormalMessage).index() == 4u);
+    // Third allocation: 0x403 (clean).
+    REQUIRE(a.allocate(NidType::NormalMessage).index() == 0x403u);
 }
 
 TEST_CASE("M5Allocator::registerExternal rejects already-allocated NID",
@@ -328,12 +332,12 @@ TEST_CASE("M5Allocator output is deterministic across instances given same input
         out.push_back(a.allocate(NidType::NormalFolder).value);
         out.push_back(a.allocate(NidType::NormalMessage).value);
         out.push_back(a.allocate(NidType::NormalFolder).value);
-        a.registerExternal(Nid(NidType::NormalMessage, 5));
+        a.registerExternal(Nid(NidType::NormalMessage, 0x402u));
         out.push_back(a.allocate(NidType::NormalMessage).value);
         out.push_back(a.allocate(NidType::Attachment).value);
         out.push_back(a.allocate(NidType::Internal).value);
-        out.push_back(a.allocate(NidType::NormalMessage).value); // should skip 5
-        out.push_back(a.allocate(NidType::NormalMessage).value); // = 6
+        out.push_back(a.allocate(NidType::NormalMessage).value); // should skip 0x402
+        out.push_back(a.allocate(NidType::NormalMessage).value); // = 0x403
         return out;
     };
 
@@ -343,14 +347,14 @@ TEST_CASE("M5Allocator output is deterministic across instances given same input
 
     // Verify the run-1 sequence matches expected values explicitly (so we
     // know determinism holds against a hard-coded ground truth, not just
-    // against itself).
+    // against itself). User-allocatable types start at idx 0x400.
     REQUIRE(run1.size() == 8u);
-    REQUIRE(run1[0] == ((1u << 5) | 0x02u));   // NormalFolder #1
-    REQUIRE(run1[1] == ((1u << 5) | 0x04u));   // NormalMessage #1
-    REQUIRE(run1[2] == ((2u << 5) | 0x02u));   // NormalFolder #2
-    REQUIRE(run1[3] == ((2u << 5) | 0x04u));   // NormalMessage #2 (idx=2)
-    REQUIRE(run1[4] == ((1u << 5) | 0x05u));   // Attachment #1
-    REQUIRE(run1[5] == ((2u << 5) | 0x01u));   // Internal #1 (idx=2; idx=1 reserved=MessageStore)
-    REQUIRE(run1[6] == ((3u << 5) | 0x04u));   // NormalMessage #3 (idx=3, not 5)
-    REQUIRE(run1[7] == ((4u << 5) | 0x04u));   // NormalMessage #4 (idx=4; 5 pre-registered)
+    REQUIRE(run1[0] == ((0x400u << 5) | 0x02u));   // NormalFolder #1
+    REQUIRE(run1[1] == ((0x400u << 5) | 0x04u));   // NormalMessage #1
+    REQUIRE(run1[2] == ((0x401u << 5) | 0x02u));   // NormalFolder #2
+    REQUIRE(run1[3] == ((0x401u << 5) | 0x04u));   // NormalMessage #2
+    REQUIRE(run1[4] == ((0x400u << 5) | 0x05u));   // Attachment #1
+    REQUIRE(run1[5] == ((2u     << 5) | 0x01u));   // Internal #1 (idx=2; idx=1 reserved=MessageStore)
+    REQUIRE(run1[6] == ((0x403u << 5) | 0x04u));   // NormalMessage #3 (skip 0x402 pre-registered)
+    REQUIRE(run1[7] == ((0x404u << 5) | 0x04u));   // NormalMessage #4
 }
