@@ -524,7 +524,21 @@ int runPstInfo(const string& path)
         checkPageTrailer(file.data() + off, off, label, log);
     };
 
-    checkPageAt(0x0400, "AMap");
+    // M11-G: AMap[0] in a Unicode 2.0 PST lives at 0x4400 per
+    // [MS-PST] §2.6.1.1 (16 KB HEADER region precedes it). pst_info
+    // explicitly enforces this — a writer regression that puts AMap[0]
+    // at 0x400 (the legacy wrong value) would surface here as a
+    // missing-page failure plus a separate M11-G ibAMapLast check.
+    checkPageAt(0x4400, "AMap");
+    if (ibAMapLast == 0x4400ull) {
+        log.pass("ROOT.ibAMapLast == 0x4400 (M11-G: first AMap location)");
+    } else {
+        std::ostringstream msg;
+        msg << "ROOT.ibAMapLast=0x" << std::hex << std::uppercase
+            << ibAMapLast << " expected 0x4400 "
+            << "(M11-G: first AMap of Unicode 2.0 PST is at 0x4400)";
+        log.fail(msg.str());
+    }
     checkPageAt(brefNbtIb, "NBT root leaf");
     checkPageAt(brefBbtIb, "BBT root");
 

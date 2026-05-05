@@ -106,6 +106,13 @@ buildPstBaselineEntries(const array<uint8_t, 16>& providerUid,
     out.push_back(mkEntry(Nid{0x0000012Eu}, Nid{0u}, buildFolderContentsTc().hnBytes));
     out.push_back(mkEntry(Nid{0x0000012Fu}, Nid{0u}, buildFolderFaiContentsTc().hnBytes));
 
+    // 6b. Receive Folder Table (0x0617) — minimal 1-row default-class
+    //     mapping per [MS-PST] §2.4.5. Required by scanpst.exe; absent
+    //     surfaces as "Receive folder table missing" / "missing default
+    //     message class" errors. (Tier 2 ISSUE G.)
+    out.push_back(mkEntry(Nid{0x00000617u}, Nid{0u},
+                          buildReceiveFolderTableTc().hnBytes));
+
     // 7-8. Bare nodes
     out.push_back(mkEntry(Nid{0x000001E1u}, Nid{0u}, buildEmptyNodePayload()));
     out.push_back(mkEntry(Nid{0x00000201u}, Nid{0u}, buildEmptyNodePayload()));
@@ -172,6 +179,7 @@ void registerBaselineReservedNids(M5Allocator& alloc)
     constexpr uint32_t kReserved[] = {
         0x0000012Du, 0x0000012Eu, 0x0000012Fu,
         0x0000060Du, 0x0000060Eu, 0x0000060Fu, 0x00000610u,
+        0x00000617u,                          // ReceiveFolderTable (Tier 2 G)
         0x00000671u, 0x00000692u,
         0x00002223u,
         0x00008022u, 0x0000802Du, 0x0000802Eu, 0x0000802Fu,

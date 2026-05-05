@@ -329,14 +329,36 @@ TEST_CASE("TC structured body matches [MS-PST] Sec 3.11 sample (parse-only; M4 r
     const auto regen = buildHeapOnNode(a.data(), a.size(),
                                        /*bClientSig=*/0x7Cu,
                                        /*hidUserRoot=*/0x00000040u);
-    REQUIRE(regen.size() == golden.size());
-    for (size_t i = 0; i < regen.size(); ++i) {
+    // M11-H: our writer puts rgibAlloc[cAlloc] == ibHnpm (DWORD-aligned)
+    // per [MS-PST] §2.3.1.5 prose AND scanpst's recovery requirement,
+    // and inserts a phantom allocation to absorb alignment pad without
+    // bloating the last user allocation. The §3.11 sample byte-dump
+    // does NOT use a phantom — it puts rgibAlloc[7]=0x1BB (one byte
+    // before ibHnpm=0x1BC) and keeps cAlloc=7. We follow [MS-PST]
+    // PROSE + scanpst, so the regenerated HN has cAlloc=8 (one
+    // phantom) and HNPAGEMAP is 2 bytes longer than the golden.
+    REQUIRE(regen.size() == golden.size() + 2u);  // +2 for phantom rgibAlloc entry
+
+    // Bytes BEFORE HNPAGEMAP must still byte-match the golden — the
+    // phantom occupies bytes [0x1BB, 0x1BC) which were already zero
+    // pad in the golden, so the data section is identical.
+    for (size_t i = 0; i < 0x01BCu; ++i) {
         if (regen[i] != golden[i]) {
             INFO("first mismatch at offset 0x" << std::hex << i
                  << ": regen=" << +regen[i] << " golden=" << +golden[i]);
-            FAIL("byte mismatch in §3.11 TC HN round-trip");
+            FAIL("byte mismatch in §3.11 TC HN data section (pre-HNPAGEMAP)");
         }
     }
+
+    // Verify the M11-H structure: cAlloc=8, sentinel=ibHnpm, phantom
+    // alloc starts at 0x1BB and ends at 0x1BC (1 byte).
+    REQUIRE(readU16(regen.data(), 0x01BCu) == 8u);          // cAlloc (was 7)
+    REQUIRE(readU16(regen.data(), 0x01BCu + 4u + 7u * 2u) == 0x01BBu); // phantom start
+    REQUIRE(readU16(regen.data(), 0x01BCu + 4u + 8u * 2u) == 0x01BCu); // sentinel = ibHnpm
+
+    // Golden has the legacy (non-DWORD-aligned) sentinel:
+    REQUIRE(readU16(golden.data(), 0x01BCu) == 7u);
+    REQUIRE(readU16(golden.data(), 0x01BCu + 4u + 7u * 2u) == 0x01BBu);
 }
 
 // ============================================================================
@@ -580,10 +602,13 @@ TEST_CASE("buildPropertyContext: synthetic 7-prop input has the design-doc HN sh
     REQUIRE(readU32(g, 4) == makeHid(1));          // hidUserRoot = HID 0x20
 
     // ---- HNPAGEMAP ----
-    // Allocations: header(8) + leaf(56) + 3 HN values (body=120, dispname=34,
-    // mvUnicode=44) = 5 allocations.
+    // User allocations: header(8) + leaf(56) + 3 HN values (body=120,
+    // dispname=34, mvUnicode=44) = 5 user allocations. Cumulative
+    // cursor = 12 + 8 + 56 + 120 + 34 + 44 = 274 — NOT DWORD-aligned,
+    // so M11-H inserts a 2-byte phantom allocation between the last
+    // user alloc and ibHnpm. Total cAlloc = 5 + 1 = 6.
     const size_t ibHnpm = readU16(g, 0);
-    REQUIRE(readU16(g, ibHnpm + 0) == 5u);          // cAlloc
+    REQUIRE(readU16(g, ibHnpm + 0) == 6u);          // cAlloc (5 user + 1 phantom)
     REQUIRE(readU16(g, ibHnpm + 2) == 0u);          // cFree
 
     const uint16_t a0 = readU16(g, ibHnpm + 4);     // start of allocation 1
@@ -1101,7 +1126,10 @@ TEST_CASE("buildTableContext: zero-row TC sets hnidRows=0 and zero-size row allo
 
     const uint16_t ibHnpm   = readU16(h, 0);
     const uint16_t cAlloc   = readU16(h, ibHnpm + 0);
-    REQUIRE(cAlloc == 4u);   // BTHHEADER + TCINFO + (empty)leaf + (empty)matrix
+    // M11-H: 4 user allocs (header + TCINFO + empty-leaf + empty-matrix)
+    // sum to a non-DWORD-aligned cursor (12 + 8 + 38 + 0 + 0 = 58),
+    // so a phantom allocation absorbs the 2-byte align pad.
+    REQUIRE(cAlloc == 5u);   // 4 user + 1 phantom
 
     auto allocSize = [&](size_t i) -> size_t {
         const uint16_t s = readU16(h, ibHnpm + 4u + i * 2u);
@@ -1113,6 +1141,7 @@ TEST_CASE("buildTableContext: zero-row TC sets hnidRows=0 and zero-size row allo
     REQUIRE(allocSize(1) == 22u + 2u * 8u);  // TCINFO + 2 TCOLDESCs = 38
     REQUIRE(allocSize(2) == 0u);   // empty RowIndex BTH leaf
     REQUIRE(allocSize(3) == 0u);   // empty Row Matrix
+    REQUIRE(allocSize(4) == 2u);   // M11-H phantom (2-byte align pad)
 
     // TCINFO.hnidRows MUST be 0 per §2.3.4.1.
     const uint16_t tcInfoOff = readU16(h, ibHnpm + 4u + 1 * 2u);

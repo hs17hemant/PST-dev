@@ -570,7 +570,10 @@ TcResult buildRecipientTc(const vector<graph::Recipient>& recipients)
 
         // Fixed cells
         detail::writeU32(dst,  0, rowId);
-        detail::writeU32(dst,  4, 0u);                                  // LtpRowVer
+        // LtpRowVer: spec wants monotonic. Mirror rowId so values are
+        // strictly ascending with row order — search-index dedup paths
+        // distinguish recipient updates by RowVer. (M11-#12.)
+        detail::writeU32(dst,  4, rowId);                               // LtpRowVer
         detail::writeU32(dst,  8, static_cast<uint32_t>(src.kind));     // RecipientType
         detail::writeU32(dst, 16, 6u);                                  // ObjectType: MAPI_MAILUSER
         detail::writeU32(dst, 40, 0u);                                  // DisplayType: 0 = MAILUSER
@@ -865,6 +868,24 @@ struct M7SlBlock {
     vector<SlEntry>    entries;
 };
 
+// A scheduled X/XXBLOCK (BID-list block chaining data blocks). cLevel=1
+// produces XBLOCK pointing to data blocks; cLevel=2 produces XXBLOCK
+// pointing to XBLOCKs. lcbTotal is the sum of indirected payload bytes.
+struct M7XBlock {
+    Bid              bid;
+    uint8_t          cLevel;
+    uint32_t         lcbTotal;
+    vector<Bid>      childBids;
+};
+
+// XBLOCK / XXBLOCK header is 8 bytes; each child entry is 8 bytes.
+// kMaxBlockPayload = 8176, so one XBLOCK can index up to (8176-8)/8 =
+// 1021 children. One XXBLOCK indirecting through XBLOCKs can index up
+// to 1021 × 1021 ≈ 1.04M data blocks ≈ 8.5 GB raw payload.
+constexpr size_t kXBlockHeaderSize  = 8;
+constexpr size_t kXBlockMaxChildren =
+    (kMaxBlockPayload - kXBlockHeaderSize) / kXBlockEntrySize;
+
 } // namespace
 
 WriteResult writeM7Pst(const M7PstConfig& config) noexcept
@@ -886,16 +907,22 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
         M5Allocator alloc;
 
         // Storage for per-folder UTF-16-LE display names (must outlive
-        // schema struct usage).
+        // schema struct usage). Each folder iteration pushes TWO
+        // entries (display name + container class), so reserve 2× the
+        // folder count to keep raw pointers stable across the loop —
+        // a smaller reserve risks reallocation under push_back which
+        // would invalidate previously-captured `data()` pointers and
+        // produce garbled folder PCs / hierarchy rows. (M11-#6.)
         vector<vector<uint8_t>> folderNameStore;
-        folderNameStore.reserve(config.folders.size());
+        folderNameStore.reserve(config.folders.size() * 2);
 
         const Nid kDummySub{0x00000041u};
 
         // Output collections
-        vector<M7Node>   nodes;
-        vector<M7Block>  dataBlocks;
+        vector<M7Node>    nodes;
+        vector<M7Block>   dataBlocks;
         vector<M7SlBlock> slBlocks;
+        vector<M7XBlock>  xBlocks;
 
         // Helper: schedule a data block & node.
         auto scheduleNode = [&](Nid nid, Nid parent,
@@ -923,6 +950,86 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             const Bid out = b.bid;
             dataBlocks.push_back(std::move(b));
             return out;
+        };
+
+        // schedulePayload — schedule an arbitrary-size byte sequence as
+        // either one data block (≤ 8176 B), one XBLOCK chaining N data
+        // blocks (≤ ~8 MB), or one XXBLOCK chaining XBLOCKs chaining
+        // data blocks (up to ~8.5 GB). Returns the BID that should land
+        // in the SLENTRY's bidData / PC HID-slot for the consumer.
+        //
+        // Used wherever a promoted-subnode payload (large body, large
+        // attachment data, large TC row matrix) is bigger than a single
+        // data block can hold. Per [MS-PST] §2.2.2.8.3.2.{1,2}.
+        auto schedulePayload = [&](vector<uint8_t> body) -> Bid {
+            const size_t total = body.size();
+            if (total <= kMaxBlockPayload) {
+                return scheduleDataBlock(std::move(body));
+            }
+
+            // Step 1: chunk into data blocks of ≤ kMaxBlockPayload each.
+            const size_t nChunks =
+                (total + kMaxBlockPayload - 1u) / kMaxBlockPayload;
+            vector<Bid>      chunkBids;     chunkBids.reserve(nChunks);
+            vector<uint32_t> chunkSizes;    chunkSizes.reserve(nChunks);
+            size_t off = 0;
+            while (off < total) {
+                const size_t cz = (total - off > kMaxBlockPayload)
+                                    ? kMaxBlockPayload : (total - off);
+                vector<uint8_t> chunk(body.begin() + off,
+                                      body.begin() + off + cz);
+                chunkBids.push_back(scheduleDataBlock(std::move(chunk)));
+                chunkSizes.push_back(static_cast<uint32_t>(cz));
+                off += cz;
+            }
+
+            // Step 2: build XBLOCK(s) over the data chunks. If we need
+            // more than one XBLOCK (>1021 chunks), wrap them under an
+            // XXBLOCK.
+            auto makeBlock = [&](uint8_t cLevel, vector<Bid> children,
+                                 uint32_t lcbTotal) -> Bid {
+                M7XBlock x;
+                x.bid       = allocInternalBid();
+                x.cLevel    = cLevel;
+                x.childBids = std::move(children);
+                x.lcbTotal  = lcbTotal;
+                const Bid out = x.bid;
+                xBlocks.push_back(std::move(x));
+                return out;
+            };
+
+            if (chunkBids.size() <= kXBlockMaxChildren) {
+                return makeBlock(/*cLevel=*/1u,
+                                 std::move(chunkBids),
+                                 static_cast<uint32_t>(total));
+            }
+
+            // Need XXBLOCK over multiple XBLOCKs.
+            vector<Bid> xblockBids;
+            const size_t nXBlocks =
+                (chunkBids.size() + kXBlockMaxChildren - 1u)
+                    / kXBlockMaxChildren;
+            xblockBids.reserve(nXBlocks);
+            size_t xbOff = 0;
+            while (xbOff < chunkBids.size()) {
+                const size_t take = (chunkBids.size() - xbOff
+                                       > kXBlockMaxChildren)
+                                      ? kXBlockMaxChildren
+                                      : (chunkBids.size() - xbOff);
+                uint32_t lcb = 0;
+                vector<Bid> children;
+                children.reserve(take);
+                for (size_t i = 0; i < take; ++i) {
+                    children.push_back(chunkBids[xbOff + i]);
+                    lcb += chunkSizes[xbOff + i];
+                }
+                xblockBids.push_back(makeBlock(/*cLevel=*/1u,
+                                               std::move(children), lcb));
+                xbOff += take;
+            }
+            return makeBlock(/*cLevel=*/2u,
+                             std::move(xblockBids),
+                             static_cast<uint32_t>(total));
         };
 
         // 1. Mandatory baseline nodes (excludes 0x802D/0x802E/0x802F).
@@ -1150,10 +1257,44 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
                 contentRows.push_back(row);
             }
 
+            // Subnode NID for the (possibly promoted) row matrix. Lives
+            // in the contentsNid's own subnode-tree namespace, so it
+            // doesn't collide with top-level NBT NIDs. NidType ≠ HID
+            // is required for HNID NID-branch decoding per §2.3.3.2.
+            const Nid kRowMatrixSubnode{
+                (static_cast<uint32_t>(NidType::Internal)) | (1u << 5)};
+
             auto tc = buildFolderContentsTc(
                 contentRows.empty() ? nullptr : contentRows.data(),
-                contentRows.size());
-            scheduleNode(rec.contentsNid, Nid{0u}, std::move(tc.hnBytes));
+                contentRows.size(),
+                kRowMatrixSubnode);
+
+            Bid contentsBidSub{0u};
+            if (!tc.subnodes.empty()) {
+                // Row matrix overflowed HN — schedule its bytes (with
+                // XBLOCK chaining if rowMatrixSize > 8176) and emplace
+                // an SLENTRY pointing at the resulting BID. Build a
+                // single-entry SLBLOCK and use it as the contentsNid's
+                // bidSub.
+                vector<SlEntry> contentsSl;
+                contentsSl.reserve(tc.subnodes.size());
+                for (auto& s : tc.subnodes) {
+                    vector<uint8_t> bytes(s.data, s.data + s.size);
+                    const Bid sBid = schedulePayload(std::move(bytes));
+                    contentsSl.emplace_back(s.nid, sBid, Bid{0u});
+                }
+                std::sort(contentsSl.begin(), contentsSl.end(),
+                          [](const SlEntry& a, const SlEntry& b) {
+                              return a.nid.value < b.nid.value;
+                          });
+                M7SlBlock slb;
+                slb.bid     = allocInternalBid();
+                slb.entries = std::move(contentsSl);
+                contentsBidSub = slb.bid;
+                slBlocks.push_back(std::move(slb));
+            }
+            scheduleNode(rec.contentsNid, Nid{0u},
+                         std::move(tc.hnBytes), contentsBidSub);
         }
 
         // ============================================================
@@ -1204,9 +1345,11 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             // Build SLBLOCK entries from PC's subnodes (large body etc.)
             vector<SlEntry> slEntries;
 
-            // 5a. Promoted body subnodes (from MailPcResult)
+            // 5a. Promoted body subnodes (from MailPcResult).
+            // Bodies > 8176 bytes (HTML newsletters, large RFC headers)
+            // are chained through XBLOCK / XXBLOCK by schedulePayload.
             for (auto& s : pc.subnodes) {
-                const Bid sBid = scheduleDataBlock(std::move(s.bytes));
+                const Bid sBid = schedulePayload(std::move(s.bytes));
                 slEntries.emplace_back(s.nid, sBid, Bid{0u});
             }
 
@@ -1263,9 +1406,12 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
                     const Bid attPcBid = scheduleDataBlock(std::move(attPc.hnBytes));
                     slEntries.emplace_back(attNids[i], attPcBid, Bid{0u});
 
-                    // Attachment PC subnodes (large data) — schedule each.
+                    // Attachment PC subnodes (large data) — schedule each
+                    // through schedulePayload so multi-MB attachment
+                    // contentBytes are chained via XBLOCK/XXBLOCK rather
+                    // than truncated at the 8176-byte single-block cap.
                     for (auto& s : attPc.subnodes) {
-                        const Bid sBid = scheduleDataBlock(std::move(s.bytes));
+                        const Bid sBid = schedulePayload(std::move(s.bytes));
                         slEntries.emplace_back(s.nid, sBid, Bid{0u});
                     }
                 }
@@ -1304,11 +1450,12 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
         // ============================================================
         // Block order: data blocks first (in the order scheduled), then
         // SLBLOCKs. IBs assigned sequentially with 64-byte alignment.
-        constexpr uint64_t kBlocksStart = 0x600u;
+        // 0x4600 = 0x4400 (kIbAMap, M11-G) + 0x200 (AMap page).
+        constexpr uint64_t kBlocksStart = 0x4600u;
 
         vector<M5DataBlockSpec> m5Blocks;
         vector<M5Node>          m5Nodes;
-        m5Blocks.reserve(dataBlocks.size() + slBlocks.size());
+        m5Blocks.reserve(dataBlocks.size() + slBlocks.size() + xBlocks.size());
         m5Nodes.reserve(nodes.size());
 
         uint64_t cursorIb = kBlocksStart;
@@ -1321,6 +1468,30 @@ WriteResult writeM7Pst(const M7PstConfig& config) noexcept
             spec.bid          = blk.bid;
             spec.encodedBlock = encoded;
             spec.cb           = static_cast<uint16_t>(blk.bodyBytes.size());
+            m5Blocks.push_back(std::move(spec));
+            cursorIb += encoded.size();
+        }
+
+        // X/XXBLOCKs are written before SLBLOCKs (no inter-dependency,
+        // ordering is just for deterministic file layout).
+        for (const auto& xb : xBlocks) {
+            vector<uint8_t> encoded;
+            if (xb.cLevel == 1u) {
+                encoded = buildXBlock(xb.childBids.data(),
+                                      xb.childBids.size(),
+                                      xb.lcbTotal, xb.bid, Ib{cursorIb});
+            } else {
+                encoded = buildXXBlock(xb.childBids.data(),
+                                       xb.childBids.size(),
+                                       xb.lcbTotal, xb.bid, Ib{cursorIb});
+            }
+            M5DataBlockSpec spec;
+            spec.bid          = xb.bid;
+            spec.encodedBlock = encoded;
+            // XBLOCK / XXBLOCK structured-body size:
+            //   kXBlockHeaderSize (= 8) + cEnt * kXBlockEntrySize (= 8)
+            spec.cb = static_cast<uint16_t>(
+                kXBlockHeaderSize + xb.childBids.size() * kXBlockEntrySize);
             m5Blocks.push_back(std::move(spec));
             cursorIb += encoded.size();
         }

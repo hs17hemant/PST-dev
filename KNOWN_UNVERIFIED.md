@@ -104,6 +104,505 @@ mail; if Outlook rejects contacts/events for the same reason, M10+
 hardening can extend the same always-emit pattern via
 `writeM8Pst` / `writeM9Pst`.
 
+### M11-G — First AMap location (0x400 → 0x4400)
+
+**Status: FIXED.**
+
+Real-Outlook open of a generated PST failed with:
+
+```
+Read(@4400): Expected (bid=4400, ptype=84, dwCRC=767F6C29, wSig=0000),
+             but read (bid=70C74CFA82609CFA, ptype=3B, dwCRC=82E7604C,
+                       wSig=9C84)
+```
+
+Per [MS-PST] §2.6.1.1 the FIRST AMap of a Unicode 2.0 PST sits at
+file offset **0x4400**, NOT 0x400. The 16 KB region [0x400, 0x4400)
+is HEADER region — fixed allocation, not tracked by any AMap. Our
+writer had been emitting AMap[0] at 0x400 since M2, which made
+Outlook (after M11-E corrected the AMap PAGETRAILER.bid) walk to
+its expected 0x4400 location and find encrypted block payload
+instead of an AMap page.
+
+**Cross-check from [MS-PST] §3.2 sample**:
+- `ROOT.ibAMapLast = 0x9B4400` (last AMap)
+- `kAMapCoverage = 0x3E000` (per AMap, 253952 bytes)
+- `(0x9B4400 - 0x4400) / 0x3E000 = exactly 40` → AMap[0] at 0x4400,
+  41 AMaps total, AMap[40] at 0x9B4400.
+
+So the spec sample itself has AMap[0] at 0x4400. Our
+`[golden_spec_header]` test is a *round-trip* — it reads §3.2's
+bytes and re-serializes — so it only confirms our serializer
+produces matching bytes given §3.2's input values. It does not pin
+our writer's *choice* of AMap location for fresh-PST output.
+
+**Why the bug went unobserved**:
+- The §3.2 round-trip test passes because it doesn't exercise the
+  fresh-PST AMap-location decision.
+- The M2 fresh-PST test (`writeEmptyPst`) hardcoded 0x400 in its
+  expectations, so it was a self-consistent confirmation of the
+  wrong value rather than validation against §3.2.
+- pst_info accepted the wrong location because it walked AMaps via
+  ROOT.ibAMapLast (which our writer correctly set to its own
+  AMap[0] location), never cross-checking against the spec-
+  mandated 0x4400.
+- Same internal-test-invisible class as M3 CRC scope and M11-E
+  AMap bid — writer + reader sharing the same wrong assumption.
+
+**Fix scope** (one structural change, propagating across layers):
+
+| Constant / Site | Old value | New value | Notes |
+|---|---|---|---|
+| [src/writer.cpp `kIbAMap`](src/writer.cpp#L29) | 0x0400 | 0x4400 | First AMap file offset |
+| [src/writer.cpp `kIbNbt`](src/writer.cpp) | 0x0600 | 0x4600 | M2 empty NBT page |
+| [src/writer.cpp `kIbBbt`](src/writer.cpp) | 0x0800 | 0x4800 | M2 empty BBT page |
+| [src/writer.cpp `kIbEof`](src/writer.cpp) | 0x0A00 | 0x4A00 | M2 file end |
+| [src/writer.cpp `kBlocksStart`](src/writer.cpp) | 0x0600 | 0x4600 | M3+ block region start |
+| Per-writer `kBlocksStart` in [src/mail.cpp](src/mail.cpp) / [src/contact.cpp](src/contact.cpp) / [src/event.cpp](src/event.cpp) / [src/messaging.cpp](src/messaging.cpp) | 0x600 | 0x4600 | Same |
+
+**Coverage formula**: [src/writer.cpp `cbAMapFreeFor`](src/writer.cpp)
+and [src/page.cpp `buildAMap`](src/page.cpp) updated to compute
+allocated bits over `[ibAMap, min(fileSize, ibAMap + kAMapCoverage))`
+rather than `[0, fileSize)`. Bit 0 of the bitmap corresponds to bytes
+`[ibAMap, ibAMap+64)`, so the AMap page itself (bytes [ibAMap,
+ibAMap+0x200)) lands in bits 0..7 — automatically marked allocated,
+which is what the spec requires.
+
+**Net layout change** (M2 empty PST):
+```
+Old (wrong)              New (M11-G)
+[0x000, 0x400) HEADER    [0x000, 0x400)  HEADER
+[0x400, 0x600) AMap      [0x400, 0x4400) HEADER region (16 KB zero pad)
+[0x600, 0x800) NBT       [0x4400, 0x4600) AMap[0]
+[0x800, 0xA00) BBT       [0x4600, 0x4800) NBT
+EOF = 0xA00              [0x4800, 0x4A00) BBT
+                         EOF = 0x4A00
+```
+
+File size grows by 0x4000 (16 KB) per PST. For an M7 PST that was
+17920 B, it's now 34304 B. The 16 KB HEADER region is zero-padded —
+real Outlook puts a DList page (§2.4.1, optional) there; we don't
+emit one, and the spec marks DList as optional.
+
+**Multi-AMap files** (file size > 0x42400 = 0x4400 + 0x3E000):
+NOT supported in this commit. Files ≤ ~270 KB are unaffected;
+larger files would need a second AMap at `0x4400 + 0x3E000 = 0x42400`
+and so on. Tracked as M10 hardening — independent of this fix.
+
+**Regression coverage** (all in this commit):
+
+1. [tests/test_ndb.cpp](tests/test_ndb.cpp) — `writeEmptyPst` test
+   updated to expect `file.size() == 0x4A00`, `ibFileEof == 0x4A00`,
+   `ibAMapLast == 0x4400`, page offsets `{0x4400, 0x4600, 0x4800}`.
+2. [tests/test_ndb.cpp](tests/test_ndb.cpp) `[ndb][page][amap]` —
+   `buildAMap` unit test runs against `Ib{0x4400}` instead of
+   `Ib{0x400}`; bitmap byte counts adjusted (24 bits set for a
+   0x4A00 file, 3 full bytes of 0xFF instead of 5).
+3. [tests/test_block.cpp](tests/test_block.cpp) — AMap page-trailer
+   self-check moves from `0x400` to `0x4400`.
+4. [tests/test_messaging.cpp `[m6_gate]`](tests/test_messaging.cpp) —
+   "every AMap page carries trailer.bid == ib" SECTION walks AMaps
+   starting at `0x4400` instead of `0x400`.
+5. [tools/pst_info.cpp](tools/pst_info.cpp) — explicit M11-G check:
+   `ROOT.ibAMapLast == 0x4400`. Future regressions surface as
+   `ROOT.ibAMapLast=0xN expected 0x4400 (M11-G: ...)`. AMap page
+   trailer check explicitly reads from `0x4400`.
+
+**Verification on regenerated `m7_full_pst.pst`**:
+
+```
+File size: 34304 bytes (0x8600)
+First 16 bytes @ 0x400:  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+First 16 bytes @ 0x4400: FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+AMap PAGETRAILER @ 0x45F0..0x45FF:
+  84 84 00 00 53 35 D0 A6 00 44 00 00 00 00 00 00
+  ptype = 0x84, trailer.bid = 0x4400
+ROOT.ibFileEof  = 0x8600
+ROOT.ibAMapLast = 0x4400
+pst_info: ALL CHECKS PASSED
+  [ OK ] AMap trailer.bid == ib (M11-E invariant)
+  [ OK ] ROOT.ibAMapLast == 0x4400 (M11-G: first AMap location)
+```
+
+**Open / future work**:
+- Multi-AMap support for files > ~270 KB (deferred).
+- DList page emission at offset 0x400 (optional per spec; we leave
+  the 16 KB zero-padded today).
+- The SPEC_GROUND_TRUTH.md note "AMap page bid stored as
+  Bid::makeInternal(amap_page_idx)" remains stale (already
+  superseded by M11-E); flag for revision in a future spec-doc
+  cleanup pass.
+
+### M11-H — HN page-map sentinel (`rgibAlloc[cAlloc]` → `ibHnpm`)
+
+**Status: FIXED.**
+
+`scanpst.exe` (Microsoft Inbox Repair Tool) on a regenerated PST
+flagged every Heap-on-Node:
+
+```
+!!HN (nid=21) last alloc doesn't point to front of page map (ibHnpm=264, ibLast=262)
+!!HN (nid=8022) last alloc doesn't point to front of page map (ibHnpm=100, ibLast=98)
+... (20+ identical-pattern errors, ibLast = ibHnpm - 2 in every case)
+```
+
+Per [MS-PST] §2.3.1.5 prose: *"rgibAlloc[cAlloc] points to the
+location of the next allocation. This in turn implies that the
+value MUST be DWORD-aligned, since the allocation API in the HN
+ensures that allocations are DWORD-aligned."* Real-Outlook
+scanpst enforces this: the LAST entry of `rgibAlloc` (the
+sentinel) must equal `ibHnpm`.
+
+Old [src/ltp.cpp `buildHeapOnNode`](src/ltp.cpp) pushed the
+**unaligned** cursor (= end of last user allocation) as the
+sentinel, with 0..3 bytes of zero pad sitting between
+`rgibAlloc[cAlloc]` and `ibHnpm`. That matched the [MS-PST] §3.11
+sample byte-dump (`rgibAlloc[7]=0x1BB`, `ibHnpm=0x1BC`, 1-byte
+gap) but not modern Outlook.
+
+**Oracle conflict — dual oracles in opposing directions**:
+- Spec §3.11 SAMPLE BYTES: sentinel may be < ibHnpm (Outlook 2003-
+  era PST shows 1-byte gap).
+- Spec §3.11 PROSE + scanpst.exe: sentinel MUST equal ibHnpm.
+
+Per CLAUDE.md oracle hierarchy, "Real-Outlook PST byte-dump" is
+the strongest oracle. scanpst.exe is Outlook's own validator —
+authoritative over a single 2003-era spec sample. We follow the
+PROSE + scanpst.
+
+**Fix**: insert a "phantom" zero-byte allocation between the last
+user allocation and `ibHnpm` whenever the cumulative cursor isn't
+DWORD-aligned. The phantom has size 1..3 bytes (= alignment pad),
+gets the next HID slot, and is never referenced. `cAlloc` grows
+by 1 in this case. Critically, **user allocation sizes derived
+via `rgibAlloc[i+1] - rgibAlloc[i]` remain exact** — the pad is
+attributed to the phantom, not bloated into the last user alloc.
+
+Naive alternative (push `ibHnpm` as sentinel without phantom)
+makes the LAST allocation appear N bytes larger to consumers,
+which corrupts PT_BINARY values and bloats PT_UNICODE strings
+with trailing nulls. Tested and rejected.
+
+**Code change** ([src/ltp.cpp `buildHeapOnNode`](src/ltp.cpp)):
+
+```cpp
+// Pre-flight: cumulative cursor past all user allocations.
+uint16_t cursorAfterUser = kHnHdrSize;
+for (size_t i = 0; i < allocCount; ++i)
+    cursorAfterUser += allocs[i].size;
+const uint16_t ibHnpm   = (cursorAfterUser + 3u) & ~uint32_t{3u};
+const bool hasPhantom   = (cursorAfterUser != ibHnpm);
+const uint16_t cAlloc   = allocCount + (hasPhantom ? 1u : 0u);
+
+// rgibAlloc construction:
+//   user allocs at their natural offsets,
+//   phantom (when needed) at cursorAfterUser,
+//   sentinel at ibHnpm.
+```
+
+The TC pre-flight size estimator
+[src/ltp.cpp `estimateHnSize`](src/ltp.cpp) updated to add 2
+bytes (one extra rgibAlloc entry) when phantom is needed, so
+row-matrix-promotion decisions stay accurate.
+
+**Tests updated**:
+- [tests/test_ltp.cpp `[golden_spec_tc]`](tests/test_ltp.cpp) §3.11
+  byte-diff: regenerated HN diverges from the 1-byte-gap golden by
+  inserting a phantom (cAlloc 7 → 8, +2 bytes for new
+  `rgibAlloc[8]`). Test now byte-matches the golden over
+  `[0, 0x1BC)` (the data section is identical) and explicitly
+  pins the M11-H structure (`cAlloc=8`, sentinel = 0x1BC, phantom
+  starts at 0x1BB).
+- [tests/test_ltp.cpp `synthetic 5-prop PC`](tests/test_ltp.cpp):
+  `cAlloc` expectation 5 → 6 (5 user + 1 phantom; cumulative
+  cursor 274 needs 2-byte pad).
+- [tests/test_ltp.cpp `zero-row TC`](tests/test_ltp.cpp): `cAlloc`
+  expectation 4 → 5 (4 user + 1 phantom; cumulative cursor 58
+  needs 2-byte pad). Added `allocSize(4) == 2` assertion to pin
+  the phantom's size.
+
+**Catches it (regression)**: scanpst log on any generated PST. If
+"last alloc doesn't point to front of page map" returns, the
+phantom-insertion logic in `buildHeapOnNode` regressed — likely
+someone reordered the `cursorAfterUser` / `ibHnpm` computation
+or dropped the phantom push.
+
+**Verification**: full test suite passes 233/233 with 5617
+assertions (was 233/233 / 5611 — net +6 from new M11-H pin
+asserts). pst_info on a regenerated `m11h_test.pst` reports
+"HN allocation offsets monotonic + within ibHnpm" for every HN
+plus "ALL CHECKS PASSED" overall. PC walk shows the original
+user-allocation sizes (e.g. 18, 16, 22 byte UTF-16-LE strings)
+unchanged — phantom doesn't bloat them.
+
+Cannot run scanpst.exe non-interactively from CI (it's a
+GUI-only tool); the user runs it manually and reports results.
+M11-D (scanpst integration) tracks adding it to the validation
+pipeline — separate commit.
+
+### M11-I — Tier 2/3 from scanpst.exe: Receive Folder Table + PR_CHANGE_KEY column
+
+**Status: PARTIAL — high-leverage fixes landed; broad re-test deferred to user.**
+
+After M11-H made HN page-maps scanpst-clean, the remaining scanpst log
+items break down into:
+
+1. **Genuine gaps** that survive M11-H's HN-page-map fix:
+   - **Receive Folder Table absent** (NID 0x0617).
+   - **`PidTagChangeKey` (0x3013)** missing from Contents TC schema.
+2. **Likely stale-PST artifacts** that resolve once scanpst can parse
+   the file (M11-H gates this):
+   - "Folder PC missing PR_DISPLAY_NAME / PR_CONTENT_COUNT / etc.":
+     [src/messaging.cpp `buildFolderPc`](src/messaging.cpp) already
+     emits all four (DisplayName, ContentCount, ContentUnreadCount,
+     Subfolders). When the parent HN's page-map was malformed,
+     scanpst couldn't read these; recovery reported them all
+     missing.
+   - "Message Store missing PR_DISPLAY_NAME / PR_RECORD_KEY /
+     PR_IPM_SUBTREE_ENTRYID / PR_PST_PASSWORD": same root cause —
+     [src/messaging.cpp `buildMessageStorePc`](src/messaging.cpp)
+     emits 11 properties including all four.
+   - "Hierarchy Table ParNID = 0": for FOLDERS (not tables),
+     [src/pst_baseline.cpp](src/pst_baseline.cpp) sets nidParent to
+     the parent folder NID correctly (0x122 for root subfolders,
+     0x8022 for items under IPM Subtree, etc.). Tables themselves
+     keep nidParent=0 per M11-D Aspose oracle. scanpst's complaint
+     about ParNID=0 on RowID=0x8022/0x8042 referenced the FOLDER
+     entries, not the tables — those folders' nidParent values
+     are correct in the baseline.
+   - "Contents TC for 8002 sub-object not found, RowID=8004": the
+     message NID exists in the NBT; scanpst couldn't materialize it
+     from a corrupt-page-map TC. M11-H gates this.
+   - "Every TC missing 26 columns": scanpst couldn't parse any TC
+     while page-maps were broken; only one column (0x3013) is
+     genuinely absent from our schema.
+
+**Fixes in this commit:**
+
+#### Receive Folder Table at NID 0x0617 (Tier 2 ISSUE G)
+
+[src/messaging.cpp `buildReceiveFolderTableTc`](src/messaging.cpp)
+emits a 4-column TC with one row mapping the default message class
+(empty string) to IPM Subtree (`NID 0x8022`):
+
+| Column | Tag | Type | ibData | iBit |
+|---|---|---|---|---|
+| LtpRowId | 0x67F2 | Int32 | 0 | 0 |
+| LtpRowVer | 0x67F3 | Int32 | 4 | 1 |
+| MessageClass_W | 0x001A | Unicode HID | 8 | 2 |
+| DisplayName_W | 0x3001 | Unicode HID | 12 | 3 |
+
+[src/pst_baseline.cpp `buildPstBaselineEntries`](src/pst_baseline.cpp)
+now emits the table at NID 0x0617 with nidParent=0 (table semantics
+per M11-D). [src/pst_baseline.cpp `registerBaselineReservedNids`](src/pst_baseline.cpp)
+adds 0x0617 to the reserved NID list.
+
+scanpst expectation: "Receive folder table missing" + "Receive
+folder table missing default message class" both clear once any
+1-row table with class="" exists at 0x0617.
+
+#### PidTagChangeKey (0x3013) in Contents TC (Tier 3 ISSUE H)
+
+[src/messaging.cpp `kContentsCols`](src/messaging.cpp) gains a 28th
+column for `PidTagChangeKey` (0x3013, PtypBinary). The HID slot
+takes ibData=116..119 (formerly the MessageToMe boolean's slot);
+the booleans MessageToMe/CcMe shift to 120/121, and the CEB region
+moves from offset 118 to 122. Per-row endBm: 122 → 126.
+
+Schema delta (TCINFO.cCols 27 → 28; rgib 116/116/118/122 →
+120/120/122/126):
+
+```cpp
+{ 0x3013u, PropType::Binary, 116, 4, 27 }   // ChangeKey (NEW)
+{ 0x0057u, PropType::Boolean, 120, 1, 13 }  // MessageToMe (was ibData=116)
+{ 0x0058u, PropType::Boolean, 121, 1, 14 }  // MessageCcMe (was ibData=117)
+```
+
+[include/pstwriter/messaging.hpp `ContentsTcRow`](include/pstwriter/messaging.hpp)
+gains `changeKeyBytes` + `changeKeySize` fields (defaults
+nullptr/0 → CEB clear, no HN allocation). Callers can leave the
+ChangeKey unset; scanpst is permissive about unpopulated columns
+once the column EXISTS in the schema. Future work: synthesize a
+22-byte XID from the message's nidParent + lastModificationTime
+to surface non-empty ChangeKey values, which Outlook needs for
+synchronization conflict detection.
+
+[tests/test_messaging.cpp](tests/test_messaging.cpp) updated:
+TCINFO.cCols 27→28, rgib values shifted, TCOLDESC[28] expected
+array adds the 0x3013 entry, both Contents TC structural tests
+and `[search_contents_tc]` test pin the new layout.
+
+#### What's deferred / not in this commit
+
+- **PT_BINARY non-empty ChangeKey emission**: column exists in
+  schema but actual rows pass nullptr. Outlook will tolerate this;
+  some sync features may degrade until populated.
+- **Search folder repairs** (Tier 4 ISSUE J): scanpst flags
+  search-folder template / activity-list / update-queue issues on
+  NIDs 0xEC1, 0x1E1, 0x6B6/6D7/6F8. scanpst recreates these
+  during recovery, so the file still opens. Out of scope for
+  this commit.
+- **Contents-TC sub-object linkage** (Tier 3 ISSUE I): scanpst's
+  "sub-object not found, RowID=8004" was reported AFTER it had
+  already failed to parse the contents TC due to HN-page-map
+  errors. With M11-H fixed, this diagnostic should not recur on
+  fresh PSTs; if it does, it's a separate finding in a follow-up
+  scanpst pass.
+- **scanpst.exe headless integration** (Task D from the user
+  prompt): scanpst is a GUI-only tool; it ignores command-line
+  PST paths and must be driven through its dialog. Adding it to
+  CI would require a UI-automation harness or porting to libpff.
+  Tracked as future M10+ work.
+
+**Verification** (full test suite):
+```
+test cases:  233 |  231 passed | 2 skipped
+assertions: 5621 | 5621 passed
+```
+
+Fresh PSTs generated for all three converters (mail, contacts,
+calendar) — `pst_info`: ALL CHECKS PASSED. Each PST has 23 TC
+nodes (was 22 pre-M11-I; +1 for the new Receive Folder Table)
+and 11 PC nodes (unchanged). User to re-run scanpst.exe on these
+files to confirm the M11-G/M11-H/M11-I fixes resolve the Tier 1
++ ISSUE G + ISSUE H errors and to surface any remaining issues
+that need a Tier 4 follow-up.
+
+### M11-F — Show-stoppers from external code review (TC overflow / XBLOCK chaining / buffer aliasing / RowVer)
+
+**Status: FIXED (4 of 21 review items). 17 remaining items deferred to M10+.**
+
+External code review identified 21 issues. Four are addressed in this
+pass — the two show-stoppers (#1 / #2) plus two small high-leverage
+items (#6 / #12). The other 17 are tracked but explicitly out of scope
+for this commit; see "Deferred items" at the bottom of this entry.
+
+#### #2 — XBLOCK / XXBLOCK chaining for arbitrary-size subnode payloads
+
+A message body or attachment > 8176 bytes (the single-block payload
+cap) previously truncated or threw, killing every real email with a
+non-trivial HTML body or any attachment > 8 KB.
+
+Fix: [src/mail.cpp `writeM7Pst`](src/mail.cpp) gained `schedulePayload(bytes)`
+which:
+- Schedules a single data block when bytes ≤ kMaxBlockPayload.
+- Chunks bytes into ≤ 1021 data blocks under one XBLOCK (cLevel=1)
+  for payloads up to ~8 MB.
+- For larger payloads, builds an XXBLOCK (cLevel=2) indirecting
+  through up to 1021 XBLOCKs — supports up to ~8.5 GB per
+  promoted subnode.
+
+Per [MS-PST] §2.2.2.8.3.2.1 / §2.2.2.8.3.2.2. Returns the BID that
+should land in the SLENTRY's `bidData` slot.
+
+Wired through the two subnode-promoted-payload sites:
+- [src/mail.cpp:1346](src/mail.cpp) — promoted message-body subnodes
+  from `MailPcResult.subnodes` (large HTML, large RFC headers).
+- [src/mail.cpp:1404](src/mail.cpp) — per-attachment data subnodes
+  from `MailPcResult.subnodes` returned by `buildAttachmentPc`.
+
+Encode loop ([src/mail.cpp:1455-1482](src/mail.cpp)) extended to emit
+X/XXBLOCKs alongside data blocks and SLBLOCKs, with `M5DataBlockSpec.cb`
+set to the structured-body size `kXBlockHeaderSize + cEnt × kXBlockEntrySize`
+per [MS-PST] §2.2.2.8.3.2.1.
+
+Regression: [tests/test_m7_end_to_end.cpp](tests/test_m7_end_to_end.cpp)
+gains `[m7_xblock_chain]` SECTION — a 50 KB plain-text body forces
+the body subnode through XBLOCK chunking; pst_info accepts the
+result, confirming the chain decodes correctly.
+
+#### #1 — TC row matrix subnode promotion
+
+A folder's CONTENTS_TABLE TC HN body is capped at 8176 bytes, so
+folders with more than ~25-40 messages overflowed and threw. Per
+[MS-PST] §2.3.4.4.1 the row matrix can be promoted to a subnode when
+it doesn't fit; the TCINFO `hnidRows` field then holds the subnode's
+NID (HNID NID-branch) instead of an HID into the parent HN.
+
+Fix: [src/ltp.cpp `buildTableContext`](src/ltp.cpp) gained an optional
+`firstSubnodeNid` parameter. When the assembled HN body would exceed
+`kMaxHnBodyBytes` AND a non-zero non-HID NID is supplied, the row
+matrix moves out of the HN allocations list into `TcResult.subnodes`;
+varlen-cell HID slots renumber from 5+ to 4+ (since the row matrix
+no longer occupies HN slot 4); TCINFO.hnidRows = `firstSubnodeNid.value`.
+
+Layout decision uses an explicit pre-flight size estimator; rather
+than build the HN twice on overflow, we compute the predicted body
+size up front (HNHDR + sum-of-allocs + DWORD-pad + HNPAGEMAP) and
+pick the layout once. Throws with a useful message if even the
+post-promotion residual HN exceeds the cap (see "current limit"
+below).
+
+Plumbed through:
+- [include/pstwriter/ltp.hpp `TcResult`](include/pstwriter/ltp.hpp) —
+  added `ownedSubnodeBytes` member to keep `subnodes[i].data`
+  pointers alive for the duration of the result.
+- [include/pstwriter/messaging.hpp / src/messaging.cpp `buildFolderContentsTc`](include/pstwriter/messaging.hpp) —
+  forwards `firstSubnodeNid` to `buildTableContext`.
+- [src/mail.cpp:1283-1311](src/mail.cpp) — per-folder Contents TC
+  scheduling allocates a subnode-NID for the row matrix, calls
+  `schedulePayload` to wrap the bytes (with XBLOCK chaining if
+  > 8176 B), builds a single-entry SLBLOCK for the contentsNid,
+  and passes that SLBLOCK's bid as `bidSub` when scheduling the
+  contentsNid's NBT entry.
+
+**Current per-folder ceiling**: ~70 messages. Above that, the parent
+HN's varlen budget (per-row Subject + DisplayTo + DisplayCc + ...
+≈ 80–120 bytes/row) fills the residual 6 KB after fixed overhead.
+True scale to 1000+ messages per folder requires multi-page HN
+([MS-PST] §2.3.1.4) — deferred to M10.
+
+Regression: [tests/test_m7_end_to_end.cpp](tests/test_m7_end_to_end.cpp)
+gains `[m7_tc_overflow]` SECTION — a 50-message folder forces the
+row matrix through subnode promotion; pst_info accepts the result.
+
+#### #12 — Recipient TC RowVer monotonic
+
+[src/mail.cpp `buildRecipientTc`](src/mail.cpp) now sets each row's
+`PidTagLtpRowVer` field to its rowId (1, 2, 3, ...) instead of a
+constant 0. RowVer is spec-monotonic per [MS-PST] §2.3.4.4.1 and
+real Outlook's search-index dedup distinguishes recipient updates by
+this field.
+
+#### #6 — Buffer-aliasing audit (folderNameStore reserve fix)
+
+[src/mail.cpp `writeM7Pst`](src/mail.cpp) `folderNameStore.reserve(...)`
+was `config.folders.size()` but each folder iteration pushes TWO
+entries (display name + container class). Under push_back beyond
+capacity, the underlying vector reallocates and invalidates any
+previously-captured `data()` pointers — silent UB, garbled folder
+PCs / hierarchy rows when folder count crosses a small-vector
+threshold.
+
+Fix: reserve `config.folders.size() * 2`. The same pattern in
+contact.cpp / event.cpp was already correct (`* 2`).
+
+Audit checked every other `vector<vector<uint8_t>>` reserve site
+across the writers (mail/contact/event/messaging) — all other reserve
+counts match their push_back counts. Per-row TC builders use
+`vector<X>(rowCount)` (no push_back) which is structurally safe.
+
+#### Deferred items (17 of 21)
+
+| # | Issue | Why deferred |
+|---|---|---|
+| 3, 4 | Recursive sub-folder support; hardcoded 0x802D | #3 needs design phase for folder-tree representation; #4 isn't actually a bug — 0x802D is the §2.7.1 mandatory NID for IPM Subtree's hierarchy table, fixed by spec |
+| 5, 13 | Streaming write | Architecture rewrite — current code builds entire PST in RAM. Mailboxes > 1 GB OOM. |
+| 7 | PidTagAttachments column | Adding a 28th col would deviate from the §3.12 byte-pinned 27-col schema; reviewer's "strict viewers may flag" is speculative. Don't change without empirical evidence. |
+| 8 | PidTagPstHiddenCount/Unread always 0 | Schema design decision; needs Outlook empirical check. |
+| 9 | Name-to-Id Map placeholder | M10 hardening. Custom named props (PidLid* appointments etc.) currently can't round-trip. |
+| 10 | Search-folder stubs not real | Tolerated by Outlook today; would surface only against strict validators. |
+| 14 | No multi-file split at 50 GB | Architecture; tracking is non-trivial. |
+| 15 | No verification gate before WriteResult{true} | Needs libpff/libpst integration. |
+| 16 | KNOWN_UNVERIFIED scattered comments | Housekeeping. |
+| 17 | Per-attachment 50 MB silent drop | Worker-side concern (env-var driven), not writer. |
+| 18, 19 | Test fixtures + round-trip oracle | Adjacent meta-work; needs one real Outlook PST to seed. |
+| 20 | Single PERMUTE encryption | CYCLIC encryption table exists, no caller demand. |
+| 21 | Metrics / observability | Adjacent meta-work. |
+
+**Suggested next session**: #5 streaming write OR multi-page HN (lifts
+the per-folder ceiling from ~70 to thousands).
+
 ### M11-E — AMap PAGETRAILER.bid must equal file offset (ib)
 
 **Status: FIXED.**

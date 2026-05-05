@@ -570,16 +570,18 @@ TEST_CASE("buildFolderContentsTc produces a Sec 3.12-shaped 27-col empty TC",
 
     // TCINFO header
     REQUIRE(hn[tciOff + 0] == 0x7Cu);    // bType
-    REQUIRE(hn[tciOff + 1] == 0x1Bu);    // cCols = 27 = 0x1B
-    // rgib computed from schema:
-    //   end4b = max(ibData+cbData) over 4/8-byte cols = 116
-    //   end2b = end4b = 116 (no 2-byte cols)
-    //   end1b = end2b + 2 (MessageToMe + MessageCcMe, 1 byte each) = 118
-    //   endBm = end1b + ceil(27/8) = 118 + 4 = 122
-    REQUIRE(detail::readU16(hn, tciOff + 2) == 116u);
-    REQUIRE(detail::readU16(hn, tciOff + 4) == 116u);
-    REQUIRE(detail::readU16(hn, tciOff + 6) == 118u);
-    REQUIRE(detail::readU16(hn, tciOff + 8) == 122u);
+    // M11-I: 28 cols (was 27) — added PidTagChangeKey 0x3013 at iBit 27.
+    REQUIRE(hn[tciOff + 1] == 0x1Cu);    // cCols = 28 = 0x1C
+    // rgib computed from schema (M11-I new layout):
+    //   end4b = max(ibData+cbData) over 4/8-byte cols = 120
+    //           (ChangeKey HID at 116..119 + ReplFlags at 112..115)
+    //   end2b = end4b = 120 (no 2-byte cols)
+    //   end1b = end2b + 2 (MessageToMe@120 + MessageCcMe@121) = 122
+    //   endBm = end1b + ceil(28/8) = 122 + 4 = 126
+    REQUIRE(detail::readU16(hn, tciOff + 2) == 120u);
+    REQUIRE(detail::readU16(hn, tciOff + 4) == 120u);
+    REQUIRE(detail::readU16(hn, tciOff + 6) == 122u);
+    REQUIRE(detail::readU16(hn, tciOff + 8) == 126u);
     REQUIRE(detail::readU32(hn, tciOff + 10) == 0x00000020u);  // hidRowIndex
     REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);           // hnidRows (0 = empty)
 
@@ -591,15 +593,17 @@ TEST_CASE("buildFolderContentsTc produces a Sec 3.12-shaped 27-col empty TC",
 
     // Verify 27 TCOLDESCs sorted by tag.
     struct ExpectedCol { uint32_t tag; uint16_t ibData; uint8_t cbData; uint8_t iBit; };
-    const ExpectedCol expected[27] = {
+    // M11-I: 28 cols (was 27) — added PidTagChangeKey 0x3013 at iBit 27.
+    // Booleans MessageToMe/CcMe shifted from 116/117 to 120/121.
+    const ExpectedCol expected[28] = {
         { 0x00170003u,  20, 4,  5 },  // Importance
         { 0x001A001Fu,  12, 4,  3 },  // MessageClass_W
         { 0x00360003u,  60, 4, 15 },  // Sensitivity
         { 0x0037001Fu,  28, 4,  7 },  // Subject_W
         { 0x00390040u,  40, 8,  9 },  // ClientSubmitTime
         { 0x0042001Fu,  24, 4,  6 },  // SentRepresentingName_W
-        { 0x0057000Bu, 116, 1, 13 },  // MessageToMe
-        { 0x0058000Bu, 117, 1, 14 },  // MessageCcMe
+        { 0x0057000Bu, 120, 1, 13 },  // MessageToMe (M11-I: was 116)
+        { 0x0058000Bu, 121, 1, 14 },  // MessageCcMe (M11-I: was 117)
         { 0x0070001Fu,  68, 4, 17 },  // ConversationTopic_W
         { 0x00710102u,  72, 4, 18 },  // ConversationIndex
         { 0x0E03001Fu,  56, 4, 12 },  // DisplayCc_W
@@ -616,11 +620,12 @@ TEST_CASE("buildFolderContentsTc produces a Sec 3.12-shaped 27-col empty TC",
         { 0x0E3D0102u, 104, 4, 24 },  // ReplCopiedfromItemid
         { 0x10970003u,  64, 4, 16 },  // ItemTemporaryFlags
         { 0x30080040u,  80, 8, 20 },  // LastModificationTime
+        { 0x30130102u, 116, 4, 27 },  // ChangeKey (M11-I new)
         { 0x65C60003u,  76, 4, 19 },  // SecureSubmitFlags
         { 0x67F20003u,   0, 4,  0 },  // LtpRowId
         { 0x67F30003u,   4, 4,  1 },  // LtpRowVer
     };
-    for (size_t i = 0; i < 27; ++i) {
+    for (size_t i = 0; i < 28; ++i) {
         const size_t off = tciOff + 22 + i * 8;
         INFO("TCOLDESC[" << i << "] expected tag=0x" << std::hex << expected[i].tag);
         REQUIRE(detail::readU32(hn, off + 0) == expected[i].tag);
@@ -826,7 +831,7 @@ TEST_CASE("buildSearchContentsTemplateTc emits a structurally-valid empty TC",
     REQUIRE(hn[3] == 0x7Cu);
     const uint16_t ibHnpm = detail::readU16(hn, 0);
     const uint16_t tciOff = detail::readU16(hn, ibHnpm + 4 + 2);
-    REQUIRE(hn[tciOff + 1] == 0x1Bu);   // cCols = 27 (matches Contents)
+    REQUIRE(hn[tciOff + 1] == 0x1Cu);   // cCols = 28 (matches Contents post-M11-I)
     REQUIRE(detail::readU32(hn, tciOff + 14) == 0u);
 }
 
@@ -966,11 +971,12 @@ TEST_CASE("writeM6Pst assembles all 27 Sec 2.7.1 nodes; pst_info passes",
         std::vector<uint8_t> fileBytes;
         REQUIRE(readEntirePstM6(cfg.path, fileBytes));
 
-        // First AMap is at 0x400; subsequent AMaps every kAMapCoverage
-        // (253,952) bytes, capped at file EOF.
+        // M11-G: First AMap is at 0x4400 (after the 16 KB HEADER
+        // region per [MS-PST] §2.6.1.1); subsequent AMaps every
+        // kAMapCoverage (253,952) bytes, capped at file EOF.
         const uint64_t fileEof = fileBytes.size();
         size_t amapsChecked = 0;
-        for (uint64_t ib = 0x400; ib + kPageSize <= fileEof;
+        for (uint64_t ib = 0x4400; ib + kPageSize <= fileEof;
              ib += kAMapCoverage)
         {
             const uint8_t* page = fileBytes.data() + ib;

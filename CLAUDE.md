@@ -91,7 +91,24 @@ These are pre-registered as M10 work in source comments + `MILESTONES.md` / `KNO
 - Contact named properties (`PidLidEmail*Address`, `PidLidFileAs`, photo) — M8-1..4.
 - Online-meeting URL named props — M9-5.
 - MSVC `/W4 /WX` build fix-ups.
-- ~~Contents-TC row population for user folders~~ — **done**, see `buildFolderContentsTc(rows, count)` overload in [src/messaging.cpp](src/messaging.cpp) and the per-folder loop in [src/mail.cpp](src/mail.cpp).
+- **Multi-page HN** ([MS-PST] §2.3.1.4) — required to lift the
+  ~70-message-per-folder ceiling. Current writer is single-page HN;
+  parent HN's varlen budget caps row count even after row-matrix
+  promotion. Real Outlook spans HNs across multiple blocks.
+- Name-to-Id Map real population — currently placeholder; custom
+  PidLid* named properties can't round-trip. (M11-#9)
+- Streaming write — entire PST is built in RAM today; mailboxes
+  > 1 GB OOM. (M11-#5/#13)
+- Multi-file split at 50 GB Unicode-PST cap. (M11-#14)
+- libpff/libpst verification gate before `WriteResult{true}`. (M11-#15)
+
+Recently closed (don't re-open without evidence):
+- ~~Contents-TC row population for user folders~~ — see `buildFolderContentsTc(rows, count)` overload.
+- ~~XBLOCK / XXBLOCK chaining for promoted subnode payloads~~ — see `schedulePayload(...)` in [src/mail.cpp](src/mail.cpp). Bodies + attachments up to ~8.5 GB.
+- ~~TC row matrix subnode promotion~~ — see `buildTableContext(..., firstSubnodeNid)`. Folders up to ~70 messages.
+- ~~AMap PAGETRAILER.bid == ib~~ — M11-E.
+- ~~Recipient TC RowVer monotonic~~ — M11-#12.
+- ~~`folderNameStore.reserve` undersized~~ — M11-#6.
 
 ---
 

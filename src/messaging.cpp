@@ -281,7 +281,12 @@ TcResult buildFolderHierarchyTc(const HierarchyTcRow* rows, size_t rowCount)
 // ----------------------------------------------------------------------------
 namespace {
 
-constexpr TcColumn kContentsCols[27] = {
+// 28-col schema (was 27) — adds PidTagChangeKey (0x3013) at iBit 27.
+// scanpst flags 0x3013 as required Contents-TC column. The HID slot
+// for ChangeKey takes the 4-byte slot at ibData=116 (formerly the
+// MessageToMe boolean), pushing the booleans to 120/121 and CEB to 122.
+// Per-row endBm = 126 (122 fixed + 4 CEB). [Tier 3 ISSUE H.]
+constexpr TcColumn kContentsCols[28] = {
     // tag-sorted ascending
     { 0x0017u, PropType::Int32,      20, 4,  5 },  // Importance
     { 0x001Au, PropType::Unicode,    12, 4,  3 },  // MessageClass_W
@@ -289,8 +294,8 @@ constexpr TcColumn kContentsCols[27] = {
     { 0x0037u, PropType::Unicode,    28, 4,  7 },  // Subject_W
     { 0x0039u, PropType::SystemTime, 40, 8,  9 },  // ClientSubmitTime
     { 0x0042u, PropType::Unicode,    24, 4,  6 },  // SentRepresentingName_W
-    { 0x0057u, PropType::Boolean,   116, 1, 13 },  // MessageToMe
-    { 0x0058u, PropType::Boolean,   117, 1, 14 },  // MessageCcMe
+    { 0x0057u, PropType::Boolean,   120, 1, 13 },  // MessageToMe (was 116)
+    { 0x0058u, PropType::Boolean,   121, 1, 14 },  // MessageCcMe (was 117)
     { 0x0070u, PropType::Unicode,    68, 4, 17 },  // ConversationTopic_W
     { 0x0071u, PropType::Binary,     72, 4, 18 },  // ConversationIndex
     { 0x0E03u, PropType::Unicode,    56, 4, 12 },  // DisplayCc_W
@@ -307,6 +312,7 @@ constexpr TcColumn kContentsCols[27] = {
     { 0x0E3Du, PropType::Binary,    104, 4, 24 },  // ReplCopiedfromItemid
     { 0x1097u, PropType::Int32,      64, 4, 16 },  // ItemTemporaryFlags
     { 0x3008u, PropType::SystemTime, 80, 8, 20 },  // LastModificationTime
+    { 0x3013u, PropType::Binary,    116, 4, 27 },  // ChangeKey (NEW: Tier 3 H)
     { 0x65C6u, PropType::Int32,      76, 4, 19 },  // SecureSubmitFlags
     { 0x67F2u, PropType::Int32,       0, 4,  0 },  // LtpRowId
     { 0x67F3u, PropType::Int32,       4, 4,  1 },  // LtpRowVer
@@ -337,15 +343,15 @@ constexpr TcColumn kFaiContentsCols[17] = {
 
 TcResult buildFolderContentsTc()
 {
-    return buildTableContext(kContentsCols, 27, nullptr, 0);
+    return buildTableContext(kContentsCols, 28, nullptr, 0);
 }
 
 namespace {
 
-// Per-row matrix size derived from the 27-col Contents schema:
-// 118 bytes of fixed data + 4-byte CEB = 122.
-constexpr size_t kContentsRowSize = 122;
-constexpr size_t kContentsCebOff  = 118;
+// Per-row matrix size derived from the 28-col Contents schema (M11-I):
+// 122 bytes of fixed data + 4-byte CEB = 126.
+constexpr size_t kContentsRowSize = 126;
+constexpr size_t kContentsCebOff  = 122;
 constexpr size_t kContentsCebSize = 4;
 
 // colIndex of each column in the tag-sorted kContentsCols[] schema.
@@ -368,8 +374,9 @@ constexpr size_t kColMessageFlags            = 13;
 constexpr size_t kColMessageSize             = 14;
 constexpr size_t kColMessageStatus           = 15;
 constexpr size_t kColLastModificationTime    = 23;
-constexpr size_t kColLtpRowId                = 25;
-constexpr size_t kColLtpRowVer               = 26;
+constexpr size_t kColChangeKey               = 24;  // M11-I: 0x3013 (Binary)
+constexpr size_t kColLtpRowId                = 26;
+constexpr size_t kColLtpRowVer               = 27;
 
 // Set the CEB bit for `iBit` (high-bit-first byte numbering — bit 0
 // of byte 0 is bit 7 of CEB[0], same convention as the Hierarchy TC).
@@ -382,10 +389,11 @@ inline void setCebBit(uint8_t* ceb, unsigned iBit) noexcept
 
 } // namespace
 
-TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount)
+TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount,
+                               Nid firstSubnodeNid)
 {
     if (rowCount == 0u) {
-        return buildTableContext(kContentsCols, 27, nullptr, 0);
+        return buildTableContext(kContentsCols, 28, nullptr, 0);
     }
 
     // Stable per-row buffers + varlen-cell descriptors. Pointers into
@@ -451,11 +459,12 @@ TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount)
             setCebBit(ceb, 20);
         }
 
-        // MessageToMe @ ibData=116, iBit=13 / MessageCcMe @ 117, iBit=14
-        // — always emit the boolean (0 = false).
-        dst[116] = src.messageToMe ? 1u : 0u;
+        // MessageToMe @ ibData=120, iBit=13 / MessageCcMe @ 121, iBit=14
+        // — always emit the boolean (0 = false). [M11-I: shifted from
+        // 116/117 to make room for ChangeKey HID at 116..119.]
+        dst[120] = src.messageToMe ? 1u : 0u;
         setCebBit(ceb, 13);
-        dst[117] = src.messageCcMe ? 1u : 0u;
+        dst[121] = src.messageCcMe ? 1u : 0u;
         setCebBit(ceb, 14);
 
         // ---- Varlen cells ----
@@ -490,6 +499,9 @@ TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount)
         pushVarlen(kColConversationIndex, 18,
                    src.conversationIndexBytes,
                    src.conversationIndexSize);
+        // ChangeKey (colIdx=24, ibData=116, iBit=27 — Binary, M11-I)
+        pushVarlen(kColChangeKey, 27,
+                   src.changeKeyBytes, src.changeKeySize);
 
         tcRows[r].rowId       = src.rowId.value;
         tcRows[r].rowBytes    = rowBuffers[r].data();
@@ -499,7 +511,8 @@ TcResult buildFolderContentsTc(const ContentsTcRow* rows, size_t rowCount)
         tcRows[r].varlenCount = perRowVarlen[r].size();
     }
 
-    return buildTableContext(kContentsCols, 27, tcRows.data(), rowCount);
+    return buildTableContext(kContentsCols, 28, tcRows.data(), rowCount,
+                             firstSubnodeNid);
 }
 
 TcResult buildFolderFaiContentsTc()
@@ -584,6 +597,58 @@ TcResult buildRecipientTemplateTc()
 TcResult buildAttachmentTemplateTc()
 {
     return buildTableContext(kAttachmentCols, 6, nullptr, 0);
+}
+
+// ----------------------------------------------------------------------------
+// buildReceiveFolderTableTc — NID 0x0617 with one default-class row.
+//
+// scanpst flags two errors when this table is absent:
+//   !!Receive folder table missing
+//   !!Receive folder table missing default message class
+//
+// Both clear once the table exists with at least one row whose
+// PidTagMessageClass is the empty string. We map "" → IPM Subtree
+// (NID 0x8022) as a conservative default — Outlook will overwrite
+// this when it learns the real Inbox node.
+// ----------------------------------------------------------------------------
+namespace {
+
+constexpr TcColumn kReceiveFolderCols[4] = {
+    // tag-sorted ascending
+    { 0x001Au, PropType::Unicode,  8, 4, 2 },  // MessageClass_W (HID)
+    { 0x3001u, PropType::Unicode, 12, 4, 3 },  // DisplayName_W (HID; folder name)
+    { 0x67F2u, PropType::Int32,    0, 4, 0 },  // LtpRowId = folder NID (default class)
+    { 0x67F3u, PropType::Int32,    4, 4, 1 },  // LtpRowVer
+};
+// 16 bytes fixed (4×4) + 1 CEB byte = 17, padded by HN to DWORD = 20.
+constexpr size_t kReceiveFolderRowSize = 17;
+constexpr size_t kReceiveFolderCebOff  = 16;
+
+} // namespace
+
+TcResult buildReceiveFolderTableTc()
+{
+    // Single row mapping default class "" to IPM Subtree (0x8022).
+    // MessageClass and DisplayName are both empty strings — varlen
+    // cells with size=0 leave the HID slot zero and the CEB bit clear,
+    // which scanpst tolerates ("default class" = empty class string).
+    array<uint8_t, kReceiveFolderRowSize> row{};
+    detail::writeU32(row.data(), 0, 0x00008022u);  // LtpRowId = IPM Subtree NID
+    detail::writeU32(row.data(), 4, 1u);            // LtpRowVer
+    // Bytes 8..11: MessageClass_W HID (zero — empty string)
+    // Bytes 12..15: DisplayName_W HID (zero — empty string)
+    // Byte 16: CEB. iBit 0 (LtpRowId) and iBit 1 (LtpRowVer) set.
+    // High-bit-first: bit 7 = iBit 0, bit 6 = iBit 1 → 0xC0.
+    row[kReceiveFolderCebOff] = 0xC0u;
+
+    TcRow tcRow{};
+    tcRow.rowId       = 0x00008022u;
+    tcRow.rowBytes    = row.data();
+    tcRow.rowSize     = kReceiveFolderRowSize;
+    tcRow.varlenCells = nullptr;
+    tcRow.varlenCount = 0;
+
+    return buildTableContext(kReceiveFolderCols, 4, &tcRow, 1);
 }
 
 // ----------------------------------------------------------------------------
@@ -772,9 +837,10 @@ WriteResult writeM6Pst(const M6PstConfig& config) noexcept
         }
 
         // ---- Encode each node's payload as a data block ----
-        // Block layout starts at 0x600 (matches writeM5Pst's expectation).
+        // Block layout starts at 0x4600 (matches writeM5Pst's expectation:
+        // kIbAMap=0x4400 + 0x200 AMap page, M11-G).
         // BIDs assigned sequentially as Bid::makeData(i+1).
-        constexpr uint64_t kBlocksStart = 0x600u;
+        constexpr uint64_t kBlocksStart = 0x4600u;
         vector<M5DataBlockSpec> blocks;
         vector<M5Node>          m5nodes;
         blocks.reserve(27);
