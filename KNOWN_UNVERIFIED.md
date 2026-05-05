@@ -104,6 +104,84 @@ mail; if Outlook rejects contacts/events for the same reason, M10+
 hardening can extend the same always-emit pattern via
 `writeM8Pst` / `writeM9Pst`.
 
+### M11-E — AMap PAGETRAILER.bid must equal file offset (ib)
+
+**Status: FIXED.**
+
+Real-Outlook open of a generated PST failed with:
+
+```
+Outlook Data File Corruption
+Format: 23 [2] / Version: 16.0.19929.00000 / Context: 0x100b0801
+Read(@400): Expected (bid=400, ptype=84, dwCRC=638A7F5D, wSig=0000),
+            but read (bid=6, ptype=84, dwCRC=638A7F5D, wSig=0000)
+```
+
+Per [MS-PST] §2.2.2.7.2 (AMap Page) + §2.6.1, AMap pages (ptype=0x84)
+must have `PAGETRAILER.bid == ib` (the page's file offset). Outlook's
+file-corruption path runs `Read(@ib)` and asserts the trailer's bid
+field exactly equals the requested offset; any other value is
+rejected as corruption regardless of CRC/wSig validity.
+
+Our writer was passing `Bid::makeInternal(1) = 0x07` to `buildAMap(...)`,
+which then landed verbatim in the trailer. The CRC, ptype, and wSig
+all matched (the trailer.bid is written *after* the CRC scope, so
+its value doesn't affect dwCRC), so internal `pst_info` and every
+end-to-end test accepted the file. Real Outlook rejected it.
+
+**Fix**: [src/page.cpp `buildAMap`](src/page.cpp) now derives the
+trailer bid from its `ib` argument internally:
+
+```cpp
+writePageTrailer(page, ptype::kAMap, Bid{ibAMap.value}, ibAMap);
+```
+
+The `bid` parameter has been dropped from
+[include/pstwriter/page.hpp `buildAMap`](include/pstwriter/page.hpp)
+so callers can no longer pass an arbitrary value — the invariant is
+structural. [src/writer.cpp](src/writer.cpp) call sites in
+`writeEmptyPst`, `writeBlocksPst`, and `writeM5Pst` were updated to
+match.
+
+**This bug was internal-test-invisible** for the same reason as the
+M3 CRC-scope bug (commit 5c4a5c6) — writer and reader shared a
+buggy assumption (both treated trailer.bid as an opaque BID, neither
+asserted bid==ib). The lesson logged at MILESTONES.md "Methodology
+lesson (2026-05-04)" applies again: shared primitives are shared
+risk; cross-validation against a fully-independent oracle (here,
+real Outlook) is the only way to catch this class of bug.
+
+**Regression coverage added** (catches future drift before Outlook
+sees the file):
+
+1. [tools/pst_info.cpp `checkPageTrailer`](tools/pst_info.cpp) now
+   asserts `bid == ib` for every AMap (`ptype=0x84`) and PMap
+   (`ptype=0x83`) page with the message
+   "trailer.bid == ib (M11-E invariant)" / fail message naming the
+   stored vs expected values.
+2. [tests/test_ndb.cpp](tests/test_ndb.cpp) `[ndb][page][amap]`
+   test updated to assert `storedBid == ib.value` instead of the
+   previous `== bid.value`.
+3. [tests/test_messaging.cpp](tests/test_messaging.cpp) `[m6_gate]`
+   gains a new SECTION "M11-E: every AMap page carries
+   trailer.bid == ib" that walks every 0x84 page in the produced
+   PST and asserts the invariant. This SECTION is the structural
+   equivalent of the existing nidParent-wiring SECTION for the
+   sibling-table case — both pin a real-Outlook-only invariant
+   that internal pst_info accepted before.
+
+**Spec-doc drift to clean up later** (out of scope for this fix):
+[Claude/SPEC_GROUND_TRUTH.md](Claude/SPEC_GROUND_TRUTH.md) (around
+line 138-145) and [Claude/SPEC_VERIFIED.md](Claude/SPEC_VERIFIED.md)
+(around line 278) both document the older "PAGETRAILER.bid is the
+page's own BID, use Bid::makeInternal(idx)" reading. Those notes
+are now superseded by this M11-E entry but left in place — flag
+them when revising the spec docs in a future pass.
+
+**PMap (ptype=0x83)** is deprecated and our writer does not emit
+PMap pages, so no PMap call site needed updating. The pst_info
+check covers PMap defensively in case any future writer adds them.
+
 ### M11-D — Folder sibling-table nidParent (§3.12 reading reconfirmed)
 
 **Status: VERIFIED CORRECT (no code change required).**

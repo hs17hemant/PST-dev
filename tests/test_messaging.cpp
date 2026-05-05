@@ -18,6 +18,7 @@
 #include "ltp.hpp"
 #include "messaging.hpp"
 #include "nbt.hpp"
+#include "ndb.hpp"
 #include "types.hpp"
 #include "writer.hpp"
 
@@ -953,6 +954,36 @@ TEST_CASE("writeM6Pst assembles all 27 Sec 2.7.1 nodes; pst_info passes",
             INFO("expected NID 0x" << std::hex << n);
             REQUIRE(seen.count(n) == 1u);
         }
+    }
+
+    SECTION("M11-E: every AMap page carries trailer.bid == ib")
+    {
+        // Per [MS-PST] §2.2.2.7.2 + §2.6.1, AMap pages (ptype=0x84)
+        // store their own file offset in PAGETRAILER.bid. Real Outlook
+        // walks Read(@ib) and rejects mismatches with "Outlook Data
+        // File Corruption". Internal-test invisible (pst_info accepts
+        // either reading until M11-E patched the bid==ib check in).
+        std::vector<uint8_t> fileBytes;
+        REQUIRE(readEntirePstM6(cfg.path, fileBytes));
+
+        // First AMap is at 0x400; subsequent AMaps every kAMapCoverage
+        // (253,952) bytes, capped at file EOF.
+        const uint64_t fileEof = fileBytes.size();
+        size_t amapsChecked = 0;
+        for (uint64_t ib = 0x400; ib + kPageSize <= fileEof;
+             ib += kAMapCoverage)
+        {
+            const uint8_t* page = fileBytes.data() + ib;
+            const uint8_t  ptype = page[kPageTrailerOffset + 0];
+            if (ptype != ptype::kAMap) continue;
+            const uint64_t storedBid =
+                detail::readU64(page, kPageTrailerOffset + 8);
+            INFO("AMap at ib=0x" << std::hex << ib
+                 << " stored bid=0x" << storedBid);
+            REQUIRE(storedBid == ib);
+            ++amapsChecked;
+        }
+        REQUIRE(amapsChecked >= 1u);
     }
 
     SECTION("nidParent wiring: Root self-ref + sub-folders point to parents")

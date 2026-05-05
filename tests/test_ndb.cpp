@@ -268,9 +268,8 @@ TEST_CASE("Empty BBT leaf has cEnt=0, cbEnt=24, cLevel=0, valid trailer",
 TEST_CASE("AMap for the M2 skeleton marks first 5 pages allocated",
           "[ndb][page][amap]")
 {
-    const Bid bid = Bid::makeInternal(1ull);
     const Ib  ib  { 0x0400ull };
-    const auto page = buildAMap(bid, ib, /*fileSize=*/0x0A00);
+    const auto page = buildAMap(ib, /*fileSize=*/0x0A00);
 
     // 0x0A00 / 64 = 40 bits set → 5 full bytes of 0xFF, then zero.
     for (size_t i = 0; i < 5; ++i) {
@@ -280,13 +279,14 @@ TEST_CASE("AMap for the M2 skeleton marks first 5 pages allocated",
     // Skip checking the entire bitmap; sample one mid-range byte.
     REQUIRE(page[200] == 0x00u);
 
-    // Trailer: AMap pages have wSig == 0 and bid = page's own BID.
+    // Trailer: AMap pages have wSig == 0 and bid == ib (per M11-E /
+    // [MS-PST] §2.2.2.7.2 + §2.6.1; verified against real Outlook open).
     REQUIRE(page[kPageTrailerOffset + 0] == ptype::kAMap);
     REQUIRE(page[kPageTrailerOffset + 1] == ptype::kAMap);
     REQUIRE(readU16(page.data(), kPageTrailerOffset + 2) == 0u);
 
     const uint64_t storedBid = readU64(page.data(), kPageTrailerOffset + 8);
-    REQUIRE(storedBid == bid.value);
+    REQUIRE(storedBid == ib.value);
 
     const uint32_t storedCRC = readU32(page.data(), kPageTrailerOffset + 4);
     const uint32_t recomputed = crc32(page.data(), kPageBodySize);

@@ -28,7 +28,7 @@ using detail::writeU64;
 // ============================================================================
 // AMap ([MS-PST] §2.2.2.7.2)
 // ============================================================================
-array<uint8_t, kPageSize> buildAMap(Bid bid, Ib ibAMap, uint64_t fileSize) noexcept
+array<uint8_t, kPageSize> buildAMap(Ib ibAMap, uint64_t fileSize) noexcept
 {
     array<uint8_t, kPageSize> page{};
 
@@ -46,7 +46,10 @@ array<uint8_t, kPageSize> buildAMap(Bid bid, Ib ibAMap, uint64_t fileSize) noexc
             static_cast<uint8_t>((1u << leftover) - 1u);
     }
 
-    writePageTrailer(page, ptype::kAMap, bid, ibAMap);
+    // PAGETRAILER.bid == page file offset (ib) per [MS-PST] §2.2.2.7.2 +
+    // §2.6.1 — verified empirically against real Outlook open. See
+    // KNOWN_UNVERIFIED.md M11-E.
+    writePageTrailer(page, ptype::kAMap, Bid::makeAmap(ibAMap.value), ibAMap);
     return page;
 }
 
